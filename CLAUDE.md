@@ -38,9 +38,7 @@ optimization -> explanation -> dashboard.
 
 \## Status
 
-Phase 0: planning. Data Requirements Doc v1 done. Next: investigate the
-
-data source (is there a EuroLeague stats API, or must we scrape?). No app
-
-code yet.
+Phase 0: planning. Data Requirements Doc v2 done — rules verified, D1
+resolved (hybrid: euroleague-api for stats). Next: build the stats
+collector, first slice = fetch one game's box score. No app code yet.
 
