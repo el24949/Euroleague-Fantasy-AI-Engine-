@@ -37,22 +37,35 @@ optimization -> explanation -> dashboard.
 
 
 \## Status
+Phase 3: prediction (in progress). Data collection + scoring + core features done.
 
-Phase 1: data collection. Data Requirements Doc v2 done — rules verified,
-D1 resolved (hybrid: euroleague-api for stats, fantasy endpoint for prices later).
+DATA (data_collection/): full 2023 regular season in data/euroleague.db,
+table `boxscores` (306 games, 8,508 rows, 29 cols). Collector is re-run-safe
+(de-dup guard on Season+Gamecode). Source: euroleague-api (fantasy price
+endpoint still to come).
 
-Working so far (data_collection/):
-- fetch_one_boxscore.py — pull one game's box score
-- store_boxscore.py — persist a game to SQLite (data/euroleague.db)
-- fetch_one_round.py — loop a full round, append to the table
-- fetch_season.py — loop a whole season with a de-dup guard (skips games
-  already stored by Season+Gamecode, so it's safe to re-run)
+SCORING (scoring/): base_score.py — ±1-per-action fantasy score, hand-verified.
+season_rules.py — season-aware multipliers via get_rules(season), fails loudly
+on unknown seasons. Captain ×1.5 (2024), ×2 (2025). NOT PIR — do not use the
+Valuation column. Misses are derived (Attempted − Made).
 
-Data lives in data/euroleague.db, table `boxscores` (29 columns, verified
-to contain every input the scoring formula needs).
+FEATURES (features/): all leakage-free (rolling windows shifted to prior games
+only). minutes.py — rolling_3/5_minutes. rolling_form.py — rolling_3/5 fantasy
+form. matchup.py — rolling_5 team defensive rating (fantasy pts conceded to
+opponents), opponent-verified.
 
-Next: feature engineering (minutes, rolling form, matchup strength), then a
-season-aware scoring function — scoring rules differ per season (captain
-×1.5 in 2024, ×2 in 2025), so multipliers must be looked up by season, not
-hardcoded.
+PREDICTION (prediction/): naive_predict.py — rolling_5 baseline (MAE 5.40).
+evaluate.py — MAE harness. model.py — linear regression (form+minutes),
+time-based train/test split, MAE 5.28. Currently adding opponent matchup as
+a 3rd feature.
+
+CONVENTIONS THAT KEEP BITING: run feature/model files as modules
+(python -m prediction.model) due to package imports. requirements.txt is UTF-16.
+Reuse existing feature/scoring functions — never recompute or reimplement.
+
+Next: finish matchup feature eval, then more features / better model, then the
+OPTIMIZER (pick best legal team: 100 credits, max 6/club, formations, captain)
+and season backtest. Live target season is 2026-27 (unplayed); 2023 is the
+validation ground.
+Per-position matchup deferred: overall version weak (coef 0.024), but per-position defense (e.g. weak vs centers) likely matters — needs player positions (row 3) + established rosters. Revisit for live season.
 
