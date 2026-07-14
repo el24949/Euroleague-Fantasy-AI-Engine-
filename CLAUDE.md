@@ -68,4 +68,6 @@ OPTIMIZER (pick best legal team: 100 credits, max 6/club, formations, captain)
 and season backtest. Live target season is 2026-27 (unplayed); 2023 is the
 validation ground.
 Per-position matchup deferred: overall version weak (coef 0.024), but per-position defense (e.g. weak vs centers) likely matters — needs player positions (row 3) + established rosters. Revisit for live season.
+future extensions:
+Domestic league games
 

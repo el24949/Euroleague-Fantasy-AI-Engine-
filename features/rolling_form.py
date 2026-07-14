@@ -26,6 +26,9 @@ def add_rolling_form(df):
     df["rolling_5"] = by_player.transform(
         lambda s: s.shift(1).rolling(5, min_periods=1).mean()
     )
+    df["consistency_5"] = by_player.transform(
+        lambda s: s.shift(1).rolling(5, min_periods=1).std()
+    )
 
     return df
 
@@ -43,6 +46,14 @@ if __name__ == "__main__":
     sample = df[df["Player"] == "EDWARDS, CARSEN"]
     print(
         sample[
-            ["Season", "Gamecode", "Player", "base_score", "rolling_3", "rolling_5"]
+            [
+                "Season",
+                "Gamecode",
+                "Player",
+                "base_score",
+                "rolling_3",
+                "rolling_5",
+                "consistency_5",
+            ]
         ].to_string(index=False)
     )
