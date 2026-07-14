@@ -17,6 +17,22 @@ def minutes_to_float(minutes_str):
     return int(mm) + int(ss) / 60
 
 
+def add_rolling_minutes(df):
+    df["minutes_numeric"] = df["Minutes"].apply(minutes_to_float)
+
+    df = df.sort_values(["Player_ID", "Season", "Gamecode"]).reset_index(drop=True)
+
+    by_player = df.groupby("Player_ID")["minutes_numeric"]
+    df["rolling_3_minutes"] = by_player.transform(
+        lambda s: s.shift(1).rolling(3, min_periods=1).mean()
+    )
+    df["rolling_5_minutes"] = by_player.transform(
+        lambda s: s.shift(1).rolling(5, min_periods=1).mean()
+    )
+
+    return df
+
+
 if __name__ == "__main__":
     conn = sqlite3.connect("data/euroleague.db")
     df = pd.read_sql_query(
@@ -26,21 +42,18 @@ if __name__ == "__main__":
     )
     conn.close()
 
-    df["minutes_numeric"] = df["Minutes"].apply(minutes_to_float)
-
-    df = df.sort_values(["Player_ID", "Season", "Gamecode"]).reset_index(drop=True)
-
-    by_player = df.groupby("Player_ID")["minutes_numeric"]
-    df["rolling_3"] = by_player.transform(
-        lambda s: s.shift(1).rolling(3, min_periods=1).mean()
-    )
-    df["rolling_5"] = by_player.transform(
-        lambda s: s.shift(1).rolling(5, min_periods=1).mean()
-    )
+    df = add_rolling_minutes(df)
 
     sample = df[df["Player"] == "EDWARDS, CARSEN"]
     print(
         sample[
-            ["Season", "Gamecode", "Player", "minutes_numeric", "rolling_3", "rolling_5"]
+            [
+                "Season",
+                "Gamecode",
+                "Player",
+                "minutes_numeric",
+                "rolling_3_minutes",
+                "rolling_5_minutes",
+            ]
         ].to_string(index=False)
     )
