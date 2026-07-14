@@ -30,6 +30,10 @@ def add_rolling_form(df):
         lambda s: s.shift(1).rolling(5, min_periods=1).std()
     )
 
+    season_to_date_avg = by_player.transform(lambda s: s.shift(1).expanding().mean())
+    deviation_from_norm = df["base_score"] - season_to_date_avg
+    df["distance_from_norm"] = deviation_from_norm.groupby(df["Player_ID"]).shift(1)
+
     return df
 
 
@@ -54,6 +58,7 @@ if __name__ == "__main__":
                 "rolling_3",
                 "rolling_5",
                 "consistency_5",
+                "distance_from_norm",
             ]
         ].to_string(index=False)
     )
