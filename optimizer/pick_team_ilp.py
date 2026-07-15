@@ -9,6 +9,10 @@ Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, and placeholder_position
 from optimizer/pick_team.py, and train_and_predict from
 prediction/model_v3.py -- nothing here is recomputed.
 
+Also enforces the max-6-players-per-club constraint (data requirements
+doc Section 2). This uses the real Team column from the box scores --
+unlike positions and prices, club is not a placeholder.
+
 PLACEHOLDER: real fantasy prices (data requirement row 5) don't exist yet.
 Prices below are a monotonic function of predicted_score (better predicted
 players cost more) plus small deterministic noise from Player_ID, scaled
@@ -26,6 +30,7 @@ from optimizer.pick_team import POSITION_REQUIREMENTS, ROUND_GAMECODES, placehol
 from prediction.model_v3 import train_and_predict
 
 BUDGET = 100
+MAX_PER_CLUB = 6
 
 
 def dummy_price(player_id, predicted_score):
@@ -70,6 +75,14 @@ if __name__ == "__main__":
         <= BUDGET
     )
 
+    for club in df_round["Team"].unique():
+        prob += (
+            pulp.lpSum(
+                player_vars[idx] for idx in df_round.index if df_round.loc[idx, "Team"] == club
+            )
+            <= MAX_PER_CLUB
+        )
+
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
     status = pulp.LpStatus[prob.status]
 
@@ -77,6 +90,9 @@ if __name__ == "__main__":
     team = df_round.loc[selected_idx]
 
     print(f"Solver status: {status}")
-    print(team[["Player", "position", "price", "predicted_score"]].to_string(index=False))
+    print(
+        team[["Player", "position", "Team", "price", "predicted_score"]].to_string(index=False)
+    )
+    print(f"\nPlayers per club:\n{team['Team'].value_counts().to_string()}")
     print(f"\nTotal price used: {team['price'].sum():.1f} / {BUDGET}")
     print(f"Total predicted score: {team['predicted_score'].sum():.2f}")
