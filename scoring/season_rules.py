@@ -9,6 +9,10 @@ SEASON_RULES = {
     2023: {"captain_multiplier": 2.0},
     2024: {"captain_multiplier": 1.5},
     2025: {"captain_multiplier": 2.0},
+    # 2026-27 season. Rules not yet announced as of July 2026 — assuming the
+    # 2025-26 ruleset carries over. VERIFY against the live app before the
+    # season starts; update here if EuroLeague changes anything.
+    2026: {"captain_multiplier": 2.0},
 }
 
 
