@@ -9,11 +9,21 @@ This is one combined MILP, not two separate stages -- the roster and the
 lineup are optimized jointly against the weighted objective below, so the
 solver can trade off "who's on the roster" against "who starts" together.
 
+Slice B adds the captain: exactly one captain, chosen from the starting
+five, whose score is multiplied by the season's captain_multiplier
+(scoring/season_rules.py, via get_rules -- never hardcoded).
+
+ASSUMPTION TO VERIFY AGAINST THE LIVE APP: the rulebook doesn't explicitly
+state whether a bench player can be captained. This code assumes the
+captain must be a starter. If the live app allows captaining a bench or
+6th-man player, this constraint needs loosening.
+
 Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, placeholder_position
 (optimizer/pick_team.py), BUDGET, MAX_PER_CLUB, dummy_price
-(optimizer/pick_team_ilp.py), and train_and_predict (prediction/model_v3.py)
--- nothing here is recomputed. Positions and prices remain placeholders,
-club is real data, same as pick_team_ilp.py.
+(optimizer/pick_team_ilp.py), train_and_predict (prediction/model_v3.py),
+and get_rules (scoring/season_rules.py) -- nothing here is recomputed.
+Positions and prices remain placeholders, club is real data, same as
+pick_team_ilp.py.
 """
 
 import pulp
@@ -21,6 +31,7 @@ import pulp
 from optimizer.pick_team import POSITION_REQUIREMENTS, ROUND_GAMECODES, placeholder_position
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB, dummy_price
 from prediction.model_v3 import train_and_predict
+from scoring.season_rules import get_rules
 
 SCORING_WEIGHT = 1.0
 BENCH_WEIGHT = 0.5
@@ -42,6 +53,11 @@ if __name__ == "__main__":
         lambda row: dummy_price(row["Player_ID"], row["predicted_score"]), axis=1
     )
 
+    seasons_in_round = df_round["Season"].unique()
+    assert len(seasons_in_round) == 1, "Expected one round to span exactly one season"
+    season = int(seasons_in_round[0])
+    captain_multiplier = get_rules(season)["captain_multiplier"]
+
     prob = pulp.LpProblem("euroleague_fantasy_lineup", pulp.LpMaximize)
 
     player_vars = {
@@ -54,6 +70,9 @@ if __name__ == "__main__":
         idx: pulp.LpVariable(f"sixth_{idx}", cat="Binary") for idx in df_round.index
     }
     formation_vars = {f: pulp.LpVariable(f"formation_{f}", cat="Binary") for f in FORMATIONS}
+    captain_vars = {
+        idx: pulp.LpVariable(f"captain_{idx}", cat="Binary") for idx in df_round.index
+    }
 
     # --- roster constraints, unchanged from pick_team_ilp.py ---
     for position, count in POSITION_REQUIREMENTS.items():
@@ -88,6 +107,12 @@ if __name__ == "__main__":
     prob += pulp.lpSum(starter_vars.values()) == 5
     prob += pulp.lpSum(sixth_man_vars.values()) == 1
 
+    # --- captain: exactly one, must be a starter (ASSUMPTION, see module docstring --
+    # --- verify against the live app whether a bench/6th-man player can be captained) ---
+    for idx in df_round.index:
+        prob += captain_vars[idx] <= starter_vars[idx]
+    prob += pulp.lpSum(captain_vars.values()) == 1
+
     # --- exactly one formation, and starters' position mix must match it ---
     prob += pulp.lpSum(formation_vars.values()) == 1
 
@@ -101,7 +126,8 @@ if __name__ == "__main__":
             == pulp.lpSum(formation_vars[f] * FORMATIONS[f][position] for f in FORMATIONS)
         )
 
-    # --- objective: 100% scoring group (starters + 6th man) + 50% bench ---
+    # --- objective: 100% scoring group (starters + 6th man) + 50% bench, plus the
+    # --- captain's *extra* (multiplier - 1) share on top of their already-counted 100% ---
     scoring_group_score = pulp.lpSum(
         df_round.loc[idx, "predicted_score"] * (starter_vars[idx] + sixth_man_vars[idx])
         for idx in df_round.index
@@ -111,7 +137,14 @@ if __name__ == "__main__":
         * (player_vars[idx] - starter_vars[idx] - sixth_man_vars[idx])
         for idx in df_round.index
     )
-    prob += SCORING_WEIGHT * scoring_group_score + BENCH_WEIGHT * bench_score
+    captain_bonus = pulp.lpSum(
+        df_round.loc[idx, "predicted_score"] * captain_vars[idx] for idx in df_round.index
+    )
+    prob += (
+        SCORING_WEIGHT * scoring_group_score
+        + BENCH_WEIGHT * bench_score
+        + (captain_multiplier - 1) * captain_bonus
+    )
 
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
     status = pulp.LpStatus[prob.status]
@@ -124,23 +157,31 @@ if __name__ == "__main__":
         if player_vars[idx].value() == 1 and idx not in starters_idx and idx not in sixth_idx
     ]
     active_formation = next(f for f in FORMATIONS if formation_vars[f].value() == 1)
+    captain_idx = next(idx for idx in df_round.index if captain_vars[idx].value() == 1)
 
+    display = df_round.copy()
+    display["Player"] = display["Player"] + display.index.to_series().apply(
+        lambda idx: " (C)" if idx == captain_idx else ""
+    )
     columns = ["Player", "position", "predicted_score"]
 
     print(f"Solver status: {status}")
     print(f"Formation: {active_formation}")
+    print(f"Season: {season}, captain_multiplier: {captain_multiplier}")
 
     print("\nStarting five:")
-    print(df_round.loc[starters_idx, columns].to_string(index=False))
+    print(display.loc[starters_idx, columns].to_string(index=False))
 
     print("\n6th man:")
-    print(df_round.loc[sixth_idx, columns].to_string(index=False))
+    print(display.loc[sixth_idx, columns].to_string(index=False))
 
     print("\nBench (50%):")
-    print(df_round.loc[bench_idx, columns].to_string(index=False))
+    print(display.loc[bench_idx, columns].to_string(index=False))
 
+    captain_score = df_round.loc[captain_idx, "predicted_score"]
     weighted_total = (
         df_round.loc[starters_idx + sixth_idx, "predicted_score"].sum() * SCORING_WEIGHT
         + df_round.loc[bench_idx, "predicted_score"].sum() * BENCH_WEIGHT
+        + (captain_multiplier - 1) * captain_score
     )
     print(f"\nWeighted total predicted score: {weighted_total:.2f}")
