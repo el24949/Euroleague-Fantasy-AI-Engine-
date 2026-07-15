@@ -22,7 +22,8 @@ from features.rolling_form import add_rolling_form
 
 CUTOFF_GAMECODE = 245  # ~80th percentile game of the 306-game season
 
-if __name__ == "__main__":
+
+def train_and_predict():
     conn = sqlite3.connect("data/euroleague.db")
     df = pd.read_sql_query(
         "SELECT * FROM boxscores WHERE Player_ID NOT IN ('Team', 'Total')",
@@ -61,8 +62,19 @@ if __name__ == "__main__":
     model = LinearRegression()
     model.fit(X_train, y_train)
 
-    train_mae = mean_absolute_error(y_train, model.predict(X_train))
-    test_mae = mean_absolute_error(y_test, model.predict(X_test))
+    train = train.copy()
+    test = test.copy()
+    train["predicted_score"] = model.predict(X_train)
+    test["predicted_score"] = model.predict(X_test)
+
+    return model, feature_cols, train, test
+
+
+if __name__ == "__main__":
+    model, feature_cols, train, test = train_and_predict()
+
+    train_mae = mean_absolute_error(train["base_score"], train["predicted_score"])
+    test_mae = mean_absolute_error(test["base_score"], test["predicted_score"])
 
     print(f"Train rows: {len(train)}")
     print(f"Test rows: {len(test)}")
