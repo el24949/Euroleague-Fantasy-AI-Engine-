@@ -22,6 +22,7 @@ own project, not just run generated code.
 
 \## Architecture (planned)
 
+
 Data collection -> database -> feature engineering -> prediction ->
 
 optimization -> explanation -> dashboard.

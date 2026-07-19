@@ -9,13 +9,14 @@ predictions are used -- picking a team from train-set predictions would
 mean optimizing over games the model already memorized while fitting,
 which isn't a fair stand-in for real deployment on unseen games.
 
-PLACEHOLDER: real player positions (data requirement row 3) don't exist
-yet. Positions below are a deterministic hash of Player_ID, purely so the
-roster-shape constraint has something to optimize against. This has no
-basketball meaning and must be replaced once real position data lands.
+Positions come from the real `positions` table in data/euroleague.db
+(built by data_collection/fetch_positions.py from GameStats.get_game_stats,
+100% coverage for 2023), joined on Player_ID. attach_positions fails loudly
+if any candidate player has no match -- with full coverage, a miss can only
+be a join bug (wrong season, bad normalization, stale DB), never a real gap.
 """
 
-import hashlib
+import sqlite3
 
 import pandas as pd
 
@@ -25,16 +26,44 @@ ROUND_GAMECODES = range(253, 262)  # one verified full round: 9 games, 18 teams,
 POSITION_REQUIREMENTS = {"G": 4, "F": 4, "C": 2}
 
 
-def placeholder_position(player_id):
-    digest = hashlib.md5(player_id.encode()).hexdigest()
-    return ["G", "F", "C"][int(digest, 16) % 3]
+def get_round_season(df_round):
+    seasons = df_round["Season"].unique()
+    assert len(seasons) == 1, "Expected one round to span exactly one season"
+    return int(seasons[0])
+
+
+def load_positions(season):
+    conn = sqlite3.connect("data/euroleague.db")
+    positions_df = pd.read_sql_query(
+        "SELECT Player_ID, Position FROM positions WHERE Season = ?", conn, params=[season]
+    )
+    conn.close()
+    return dict(zip(positions_df["Player_ID"], positions_df["Position"]))
+
+
+def attach_positions(df_round):
+    season = get_round_season(df_round)
+    positions_lookup = load_positions(season)
+
+    df_round = df_round.copy()
+    normalized_id = df_round["Player_ID"].str.strip().str.lstrip("P")
+    df_round["position"] = normalized_id.map(positions_lookup)
+
+    missing = df_round[df_round["position"].isna()]
+    if len(missing):
+        raise ValueError(
+            f"{len(missing)} candidate players have no position in the positions "
+            f"table for season {season} (2023 coverage is 100%, so this means a "
+            f"join bug, not a real data gap): {missing['Player'].tolist()}"
+        )
+    return df_round
 
 
 if __name__ == "__main__":
     model, feature_cols, train, test = train_and_predict()
 
     df_round = test[test["Gamecode"].isin(ROUND_GAMECODES)].copy()
-    df_round["position"] = df_round["Player_ID"].apply(placeholder_position)
+    df_round = attach_positions(df_round)
 
     selected_groups = []
     for position, count in POSITION_REQUIREMENTS.items():

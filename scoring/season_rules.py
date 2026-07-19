@@ -13,6 +13,7 @@ SEASON_RULES = {
     # 2025-26 ruleset carries over. VERIFY against the live app before the
     # season starts; update here if EuroLeague changes anything.
     2026: {"captain_multiplier": 2.0},
+    
 }
 
 

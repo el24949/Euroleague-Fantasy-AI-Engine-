@@ -18,17 +18,30 @@ state whether a bench player can be captained. This code assumes the
 captain must be a starter. If the live app allows captaining a bench or
 6th-man player, this constraint needs loosening.
 
-Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, placeholder_position
-(optimizer/pick_team.py), BUDGET, MAX_PER_CLUB, dummy_price
+Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, attach_positions, and
+get_round_season (optimizer/pick_team.py), BUDGET, MAX_PER_CLUB, dummy_price
 (optimizer/pick_team_ilp.py), train_and_predict (prediction/model_v3.py),
-and get_rules (scoring/season_rules.py) -- nothing here is recomputed.
-Positions and prices remain placeholders, club is real data, same as
-pick_team_ilp.py.
+get_rules (scoring/season_rules.py), and load_unavailable
+(optimizer/availability.py) -- nothing here is recomputed. Positions are
+real (see pick_team.py's docstring); prices remain a placeholder; club is
+real data -- same as pick_team_ilp.py.
+
+Before the roster/lineup MILP runs, players listed in data/unavailable.csv
+(hand-edited, out/doubtful for the upcoming round) are dropped from
+df_round entirely -- they never enter player_vars, so the solver has no way
+to select them at any weight, unlike zero-scoring them which would still
+let them occupy a roster slot for free.
 """
 
 import pulp
 
-from optimizer.pick_team import POSITION_REQUIREMENTS, ROUND_GAMECODES, placeholder_position
+from optimizer.availability import load_unavailable
+from optimizer.pick_team import (
+    POSITION_REQUIREMENTS,
+    ROUND_GAMECODES,
+    attach_positions,
+    get_round_season,
+)
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB, dummy_price
 from prediction.model_v3 import train_and_predict
 from scoring.season_rules import get_rules
@@ -48,14 +61,26 @@ if __name__ == "__main__":
     model, feature_cols, train, test = train_and_predict()
 
     df_round = test[test["Gamecode"].isin(ROUND_GAMECODES)].copy()
-    df_round["position"] = df_round["Player_ID"].apply(placeholder_position)
+    df_round = attach_positions(df_round)
+
+    # --- exclude out/doubtful players (data/unavailable.csv) from the candidate
+    # --- pool entirely, rather than zero-scoring them, so the solver can't pick
+    # --- them at any weight ---
+    unavailable = load_unavailable()
+    excluded_ids = {entry["player_id"] for entry in unavailable}
+    excluded_mask = df_round["Player_ID"].str.strip().isin(excluded_ids)
+    excluded_names = df_round.loc[excluded_mask, "Player"].unique().tolist()
+    df_round = df_round[~excluded_mask].copy()
+
+    print(f"Excluded {len(excluded_names)} unavailable player(s) from the candidate pool:")
+    for name in excluded_names:
+        print(f"  {name}")
+
     df_round["price"] = df_round.apply(
         lambda row: dummy_price(row["Player_ID"], row["predicted_score"]), axis=1
     )
 
-    seasons_in_round = df_round["Season"].unique()
-    assert len(seasons_in_round) == 1, "Expected one round to span exactly one season"
-    season = int(seasons_in_round[0])
+    season = get_round_season(df_round)
     captain_multiplier = get_rules(season)["captain_multiplier"]
 
     prob = pulp.LpProblem("euroleague_fantasy_lineup", pulp.LpMaximize)

@@ -5,13 +5,14 @@ and predicted score trade off against each other across positions, so we
 need an actual solver rather than the greedy per-group nlargest used in
 pick_team.py.
 
-Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, and placeholder_position
-from optimizer/pick_team.py, and train_and_predict from
-prediction/model_v3.py -- nothing here is recomputed.
+Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, and attach_positions from
+optimizer/pick_team.py, and train_and_predict from prediction/model_v3.py
+-- nothing here is recomputed. Positions are now real (see pick_team.py's
+docstring), not a placeholder.
 
 Also enforces the max-6-players-per-club constraint (data requirements
 doc Section 2). This uses the real Team column from the box scores --
-unlike positions and prices, club is not a placeholder.
+unlike prices, club is not a placeholder.
 
 PLACEHOLDER: real fantasy prices (data requirement row 5) don't exist yet.
 Prices below are a monotonic function of predicted_score (better predicted
@@ -26,7 +27,7 @@ import hashlib
 
 import pulp
 
-from optimizer.pick_team import POSITION_REQUIREMENTS, ROUND_GAMECODES, placeholder_position
+from optimizer.pick_team import POSITION_REQUIREMENTS, ROUND_GAMECODES, attach_positions
 from prediction.model_v3 import train_and_predict
 
 BUDGET = 100
@@ -45,7 +46,7 @@ if __name__ == "__main__":
     model, feature_cols, train, test = train_and_predict()
 
     df_round = test[test["Gamecode"].isin(ROUND_GAMECODES)].copy()
-    df_round["position"] = df_round["Player_ID"].apply(placeholder_position)
+    df_round = attach_positions(df_round)
     df_round["price"] = df_round.apply(
         lambda row: dummy_price(row["Player_ID"], row["predicted_score"]), axis=1
     )
