@@ -18,15 +18,14 @@ state whether a bench player can be captained. This code assumes the
 captain must be a starter. If the live app allows captaining a bench or
 6th-man player, this constraint needs loosening.
 
-Reuses ROUND_GAMECODES, POSITION_REQUIREMENTS, attach_positions, and
-get_round_season (optimizer/pick_team.py), BUDGET, MAX_PER_CLUB
-(optimizer/pick_team_ilp.py), train_and_predict (prediction/model_v3.py),
-get_rules (scoring/season_rules.py), load_unavailable
-(optimizer/availability.py), and load_prices
-(data_collection/load_prices.py) -- nothing here is recomputed. Positions
-are real (see pick_team.py's docstring); prices are now real quotations
-from the price sheet, joined on Player_ID (no longer the dummy_price
-placeholder); club is real data -- same as pick_team_ilp.py.
+Reuses POSITION_REQUIREMENTS, attach_positions, and get_round_season
+(optimizer/pick_team.py), BUDGET, MAX_PER_CLUB (optimizer/pick_team_ilp.py),
+train_and_predict (prediction/model_v3.py), get_rules
+(scoring/season_rules.py), load_unavailable (optimizer/availability.py),
+and load_prices (data_collection/load_prices.py) -- nothing here is
+recomputed. Positions are real (see pick_team.py's docstring); prices are
+real quotations from the price sheet, joined on Player_ID; club is real
+data -- same as pick_team_ilp.py.
 
 Before the roster/lineup MILP runs, players listed in data/unavailable.csv
 (hand-edited, out/doubtful for the upcoming round) are dropped from
@@ -35,44 +34,40 @@ to select them at any weight, unlike zero-scoring them which would still
 let them occupy a roster slot for free. Candidates with no matching price
 are dropped from the pool the same way, for the same reason.
 
-NOTE ON PRICE COVERAGE: load_prices' own coverage report (run it directly)
-shows only 1 of 355 real Season=2025 players lack a price. The much larger
-exclusion count seen when *this* file runs (dozens, not one) is a separate,
-expected effect: the candidate pool here is the 2023 validation round, and
-the price sheet is a current snapshot -- most 2023 players have since
-retired or left EuroLeague and were never going to be in a current price
-list. This gap should shrink to near-zero once the optimizer runs against
-a real current round (the actual 2026-27 live target), which is the only
-setting where "2023 roster, current prices" wouldn't be a mismatch by
-construction.
-
-BUG SURFACED BY THIS CHANGE, FIXED HERE: ROUND_GAMECODES (253-261) was
-calibrated against the 2023 test set only. Once data_collection/load_prices.py
-added 2025 boxscores to the same database, that Gamecode range started
-matching games in *both* seasons (schedules restart game numbering each
-season), which broke get_round_season's "exactly one season per round"
-assertion. df_round now explicitly filters to Season 2023 to restore the
-original, intended round. optimizer/pick_team.py and pick_team_ilp.py have
-the same latent bug -- left alone here since fixing them isn't this file's
-job, but they'll raise the same AssertionError if run as-is.
+RUNS FULLY ON SEASON 2025 (previously it validated against a 2023 round
+while joining current-season prices, a mismatch that excluded dozens of
+players who'd since retired or left EuroLeague -- see git history for that
+version). model_v3.train_and_predict() now trains and tests entirely within
+Season 2025 (prediction/model_v3.py), so its `test` DataFrame is already
+100% Season 2025 by construction. ROUND_GAMECODES_2025 below picks one real
+round from within that test range (Gamecode >= model_v3.CUTOFF_GAMECODE),
+and df_round still filters on Season == 2025 explicitly rather than relying
+on that invariant -- if train_and_predict's split logic ever changes to mix
+seasons again, this file fails loudly (via get_round_season's assertion)
+instead of silently picking a blended-season "round" again. Since the round
+is now real 2025 games, price coverage against it should be close to
+load_prices' own report (currently 354/355 real Season=2025 players
+priced).
 """
 
 import pulp
 
 from data_collection.load_prices import load_prices
 from optimizer.availability import load_unavailable
-from optimizer.pick_team import (
-    POSITION_REQUIREMENTS,
-    ROUND_GAMECODES,
-    attach_positions,
-    get_round_season,
-)
+from optimizer.pick_team import POSITION_REQUIREMENTS, attach_positions, get_round_season
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
 from prediction.model_v3 import train_and_predict
 from scoring.season_rules import get_rules
 
 SCORING_WEIGHT = 1.0
 BENCH_WEIGHT = 0.5
+
+# One real, complete Season 2025 round: 10 consecutive Gamecodes, 20 distinct
+# teams with no repeats (verified against boxscores), fully inside
+# model_v3's test range (Gamecode >= CUTOFF_GAMECODE = 304). Unlike the old
+# ROUND_GAMECODES (optimizer/pick_team.py, calibrated to the 2023 test set's
+# 9-games/18-teams round shape), 2025 has 20 teams, so a round is 10 games.
+ROUND_GAMECODES_2025 = range(311, 321)
 
 FORMATIONS = {
     "2-2-1": {"G": 2, "F": 2, "C": 1},
@@ -85,9 +80,12 @@ FORMATIONS = {
 if __name__ == "__main__":
     model, feature_cols, train, test = train_and_predict()
 
-    # Season=2023 pins this to the round ROUND_GAMECODES was calibrated
-    # against -- see the module docstring's "BUG SURFACED" note.
-    df_round = test[test["Gamecode"].isin(ROUND_GAMECODES) & (test["Season"] == 2023)].copy()
+    # test is already 100% Season 2025 (model_v3.train_and_predict asserts
+    # this), but the Season == 2025 filter is kept explicit rather than
+    # relying on that invariant -- see the module docstring.
+    df_round = test[
+        test["Gamecode"].isin(ROUND_GAMECODES_2025) & (test["Season"] == 2025)
+    ].copy()
     df_round = attach_positions(df_round)
 
     # --- exclude out/doubtful players (data/unavailable.csv) from the candidate
@@ -237,6 +235,18 @@ if __name__ == "__main__":
             f"Solver selected candidate(s) with no price, which should be "
             f"impossible -- the pool exclusion above must have a bug: "
             f"{df_round.loc[roster_idx][missing_price]['Player'].tolist()}"
+        )
+
+    # --- same guarantee for position: attach_positions() already raises for
+    # --- *any* candidate missing a position before the pool is even built
+    # --- (see optimizer/pick_team.py), so this can only fire if that
+    # --- upstream guarantee is ever weakened ---
+    missing_position = df_round.loc[roster_idx, "position"].isna()
+    if missing_position.any():
+        raise ValueError(
+            f"Solver selected candidate(s) with no position, which should be "
+            f"impossible -- attach_positions' pool-wide check must have a bug: "
+            f"{df_round.loc[roster_idx][missing_position]['Player'].tolist()}"
         )
 
     display = df_round.copy()

@@ -54,8 +54,11 @@ minutes.py (rolling_3/5_minutes), rolling_form.py (rolling_3/5), matchup.py
 (rolling_5 team defensive rating, opponent-verified), plus consistency_5 and
 distance_from_norm.
 
-PREDICTION (prediction/): naive baseline MAE 5.40 → linear v3 (7 features)
-**MAE 5.223** ← current best. Random Forest tested + regularized across 9 configs:
+PREDICTION (prediction/): naive baseline MAE 5.40 → linear v3 (7 features): 2025-only chronological split, **MAE 5.506** ← current baseline.
+(Old 2023 single-season number was 5.22 but measured on a now-fixed blended/leaky
+split — not comparable.) DB now holds 2023+2025; all rolling features keyed on
+(Season, Player_ID/Team) to prevent cross-season blending.
+ Random Forest tested + regularized across 9 configs:
 never beat linear. FINDING: model is not the bottleneck, features are. Single-season
 box-score signal is ~tapped out; each new feature buys only ~0.03.
 
