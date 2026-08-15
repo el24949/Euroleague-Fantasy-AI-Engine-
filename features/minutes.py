@@ -22,7 +22,11 @@ def add_rolling_minutes(df):
 
     df = df.sort_values(["Player_ID", "Season", "Gamecode"]).reset_index(drop=True)
 
-    by_player = df.groupby("Player_ID")["minutes_numeric"]
+    # Gamecode resets each season, so grouping on Player_ID alone would let
+    # a rolling window reach across the season boundary (see
+    # features/rolling_form.py for the same fix). [Season, Player_ID] gives
+    # each player a fresh group per season.
+    by_player = df.groupby(["Season", "Player_ID"])["minutes_numeric"]
     df["rolling_3_minutes"] = by_player.transform(
         lambda s: s.shift(1).rolling(3, min_periods=1).mean()
     )

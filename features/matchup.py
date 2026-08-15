@@ -28,7 +28,11 @@ def add_team_rolling_defense(df):
 
     matchup = matchup.sort_values(["Team", "Season", "Gamecode"]).reset_index(drop=True)
 
-    by_team = matchup.groupby("Team")["conceded"]
+    # Gamecode resets each season, so grouping on Team alone would let the
+    # rolling window reach across the season boundary (see
+    # features/rolling_form.py for the same fix). [Season, Team] gives each
+    # club a fresh group per season.
+    by_team = matchup.groupby(["Season", "Team"])["conceded"]
     matchup["rolling_5_conceded"] = by_team.transform(
         lambda s: s.shift(1).rolling(5, min_periods=1).mean()
     )
