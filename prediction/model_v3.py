@@ -4,10 +4,18 @@ going into that previous game. Kept as a separate column from rolling_5/
 rolling_3 form so the model can weight recent momentum (this game vs the
 player's own norm) independently from plain rolling averages.
 
-Same time-based split as model.py/model_v2.py -- earlier Gamecodes train,
-later Gamecodes test, no look-ahead. Reuses add_rolling_form (which now
-also computes distance_from_norm), add_rolling_minutes, and
-add_team_rolling_defense instead of recomputing any of them.
+Train/test split: restricted to Season 2025 only, then split by Gamecode
+within that season (earlier Gamecodes train, later Gamecodes test, no
+look-ahead). The previous Gamecode-only split (`df["Gamecode"] < 245`, no
+Season filter) silently blended 2023 and 2025 games once both were in the
+database -- Gamecode resets to 1 each season, so it compared unrelated
+games and put some 2025 games in "train" ahead of earlier 2023 games in
+"test", which isn't a valid time-based split. Restricting to one season
+first removes the ambiguity entirely.
+
+Reuses add_rolling_form (which now also computes distance_from_norm),
+add_rolling_minutes, and add_team_rolling_defense instead of recomputing
+any of them.
 """
 
 import sqlite3
@@ -20,14 +28,16 @@ from features.matchup import add_team_rolling_defense
 from features.minutes import add_rolling_minutes
 from features.rolling_form import add_rolling_form
 
-CUTOFF_GAMECODE = 245  # ~80th percentile game of the 306-game season
+SEASON = 2025
+CUTOFF_GAMECODE = 304  # ~80th percentile game of the 380-game 2025 season
 
 
 def train_and_predict():
     conn = sqlite3.connect("data/euroleague.db")
     df = pd.read_sql_query(
-        "SELECT * FROM boxscores WHERE Player_ID NOT IN ('Team', 'Total')",
+        "SELECT * FROM boxscores WHERE Season = ? AND Player_ID NOT IN ('Team', 'Total')",
         conn,
+        params=[SEASON],
     )
     conn.close()
 
@@ -56,6 +66,12 @@ def train_and_predict():
     train = df[df["Gamecode"] < CUTOFF_GAMECODE]
     test = df[df["Gamecode"] >= CUTOFF_GAMECODE]
 
+    # The SQL query already restricts to SEASON, so this should be
+    # unreachable -- fail loudly rather than silently training/testing on
+    # an unexpected season if that ever stops being true.
+    assert (train["Season"] == SEASON).all(), "Train set contains non-2025 rows"
+    assert (test["Season"] == SEASON).all(), "Test set contains non-2025 rows"
+
     X_train, y_train = train[feature_cols], train["base_score"]
     X_test, y_test = test[feature_cols], test["base_score"]
 
@@ -73,12 +89,15 @@ def train_and_predict():
 if __name__ == "__main__":
     model, feature_cols, train, test = train_and_predict()
 
-    train_mae = mean_absolute_error(train["base_score"], train["predicted_score"])
     test_mae = mean_absolute_error(test["base_score"], test["predicted_score"])
 
     print(f"Train rows: {len(train)}")
     print(f"Test rows: {len(test)}")
-    print(f"Train MAE: {train_mae:.3f}")
+    print(f"Gamecode cutoff: {CUTOFF_GAMECODE}")
+    print(
+        f"Confirmed: train seasons = {sorted(train['Season'].unique())}, "
+        f"test seasons = {sorted(test['Season'].unique())} (both 100% Season {SEASON})"
+    )
     print(f"Test MAE: {test_mae:.3f}")
     print(f"Coefficients: {dict(zip(feature_cols, model.coef_))}")
     print(f"Intercept: {model.intercept_:.3f}")

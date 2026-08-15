@@ -9,7 +9,11 @@ test MAE of 5.275.
 
 Reuses add_rolling_form (features/rolling_form.py), add_rolling_minutes
 (features/minutes.py), and add_team_rolling_defense (features/matchup.py)
-instead of recomputing any of them.
+instead of recomputing any of them. Train/test split: restricted to Season
+2025 only, then split by Gamecode within that season -- see
+prediction/model.py's docstring for why the Season filter is required
+(Gamecode resets each season, so a Gamecode-only split silently blended
+2023 and 2025 games once both were in the database).
 """
 
 import sqlite3
@@ -22,13 +26,15 @@ from features.matchup import add_team_rolling_defense
 from features.minutes import add_rolling_minutes
 from features.rolling_form import add_rolling_form
 
-CUTOFF_GAMECODE = 245  # ~80th percentile game of the 306-game season
+SEASON = 2025
+CUTOFF_GAMECODE = 304  # ~80th percentile game of the 380-game 2025 season
 
 if __name__ == "__main__":
     conn = sqlite3.connect("data/euroleague.db")
     df = pd.read_sql_query(
-        "SELECT * FROM boxscores WHERE Player_ID NOT IN ('Team', 'Total')",
+        "SELECT * FROM boxscores WHERE Season = ? AND Player_ID NOT IN ('Team', 'Total')",
         conn,
+        params=[SEASON],
     )
     conn.close()
 
@@ -49,6 +55,9 @@ if __name__ == "__main__":
     train = df[df["Gamecode"] < CUTOFF_GAMECODE]
     test = df[df["Gamecode"] >= CUTOFF_GAMECODE]
 
+    assert (train["Season"] == SEASON).all(), "Train set contains non-2025 rows"
+    assert (test["Season"] == SEASON).all(), "Test set contains non-2025 rows"
+
     X_train, y_train = train[feature_cols], train["base_score"]
     X_test, y_test = test[feature_cols], test["base_score"]
 
@@ -56,6 +65,11 @@ if __name__ == "__main__":
 
     print(f"Train rows: {len(train)}")
     print(f"Test rows: {len(test)}")
+    print(f"Gamecode cutoff: {CUTOFF_GAMECODE}")
+    print(
+        f"Confirmed: train seasons = {sorted(train['Season'].unique())}, "
+        f"test seasons = {sorted(test['Season'].unique())} (both 100% Season {SEASON})"
+    )
     print(
         f"{'max_depth':>10} {'min_samples_leaf':>18} {'train_mae':>10} "
         f"{'test_mae':>10} {'gap':>8} {'beats_linear':>13}"
