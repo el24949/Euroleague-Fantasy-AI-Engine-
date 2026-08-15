@@ -27,7 +27,7 @@ import time
 import pandas as pd
 from euroleague_api.game_stats import GameStats
 
-SEASON = 2023
+SEASON = 2025
 DB_PATH = "data/euroleague.db"
 DELAY_SECONDS = 1
 POSITION_NAME_TO_CODE = {"Guard": "G", "Forward": "F", "Center": "C"}
