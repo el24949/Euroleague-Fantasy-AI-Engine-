@@ -49,17 +49,21 @@ engine) to 112.39, and rounds beating the naive baseline rose from 10/23
 to 14/23. This is one season's worth of evidence -- re-validate against
 more seasons before trusting the exact value 0.25 long-term.
 
-COACH WIRING: before solving, this file picks a coach via
+COACH WIRING: before solving, this file builds the coach shortlist via
 coach_ranking.rank_coaches(ROUND_GAMECODES_2025) -- the SAME ranking that
-file prints standalone -- and takes the #1-ranked team's coach as "the
-chosen coach" for this round. Their price (coach_ranking.load_coach_info(),
-itself load_prices()'s excluded['head_coaches'] Quotation, never
-reparsed) is subtracted from BUDGET before solve_lineup() runs, so the 10
-players are optimized under (BUDGET - coach_price) credits, not the full
-100 -- the coach occupies a budget slot exactly like a player would, just
-outside the 4G/4F/2C roster shape. Every other constraint (positions,
-max 6/club, formations, 6th man, captain, RISK_LAMBDA) is untouched --
-only the budget value passed into solve_lineup() changes.
+file prints standalone -- prints the top SHORTLIST_SIZE (5) rows so the
+options are visible, then picks the coach at CHOSEN_COACH_RANK (1-5,
+default 1 -- the #1 team by recent-margin). Change CHOSEN_COACH_RANK
+below to choose a different shortlisted coach; anything outside 1-5 fails
+loudly rather than silently clamping or defaulting. The chosen coach's
+price (coach_ranking.load_coach_info(), itself load_prices()'s
+excluded['head_coaches'] Quotation, never reparsed) is subtracted from
+BUDGET before solve_lineup() runs, so the 10 players are optimized under
+(BUDGET - coach_price) credits, not the full 100 -- the coach occupies a
+budget slot exactly like a player would, just outside the 4G/4F/2C roster
+shape. Every other constraint (positions, max 6/club, formations, 6th
+man, captain, RISK_LAMBDA) is untouched -- only the budget value passed
+into solve_lineup() changes.
 
 Before the roster/lineup MILP runs, players listed in data/unavailable.csv
 (hand-edited, out/doubtful for the upcoming round) are dropped from
@@ -91,7 +95,7 @@ import pulp
 
 from data_collection.load_prices import load_prices
 from optimizer.availability import load_unavailable
-from optimizer.coach_ranking import rank_coaches
+from optimizer.coach_ranking import SHORTLIST_SIZE, rank_coaches
 from optimizer.pick_team import (
     POSITION_REQUIREMENTS,
     ROUND_GAMECODES_2025,
@@ -110,6 +114,12 @@ BENCH_WEIGHT = 0.5
 # 14/23 at LAMBDA=0.25. One season of evidence -- re-validate with more
 # seasons before treating 0.25 as settled.
 RISK_LAMBDA = 0.25
+
+# Which row of coach_ranking's top-SHORTLIST_SIZE shortlist to use as the
+# chosen coach: 1 = #1 team by recent-margin (the default), up to
+# SHORTLIST_SIZE. Edit this to pick a different shortlisted coach instead
+# of the top-ranked one -- validated below, fails loudly outside 1..5.
+CHOSEN_COACH_RANK = 1
 
 FORMATIONS = {
     "2-2-1": {"G": 2, "F": 2, "C": 1},
@@ -289,17 +299,39 @@ if __name__ == "__main__":
     season = get_round_season(df_round)
     captain_multiplier = get_rules(season)["captain_multiplier"]
 
-    # --- choose a coach: the #1 team in coach_ranking's own shortlist for
-    # --- this exact round, then reduce the player budget by their price
+    # --- build the coach shortlist (same ranking coach_ranking.py prints
+    # --- standalone) and show it before picking, so the options -- not
+    # --- just the final choice -- are visible ---
+    ranked_coaches = rank_coaches(ROUND_GAMECODES_2025)
+    shortlist = ranked_coaches.head(SHORTLIST_SIZE).reset_index(drop=True)
+
+    shortlist_display = shortlist.copy()
+    shortlist_display.insert(0, "rank", shortlist_display.index + 1)
+    print(f"\nCoach shortlist for this round (top {SHORTLIST_SIZE} by recent-margin):")
+    print(
+        shortlist_display[
+            ["rank", "coach", "Team", "recent_avg_margin", "opponent", "coach_price"]
+        ].to_string(index=False)
+    )
+
+    # --- CHOSEN_COACH_RANK selects which shortlist row to use -- fail
+    # --- loudly rather than silently clamping or defaulting on a bad value ---
+    if not isinstance(CHOSEN_COACH_RANK, int) or not (1 <= CHOSEN_COACH_RANK <= SHORTLIST_SIZE):
+        raise ValueError(
+            f"CHOSEN_COACH_RANK must be an integer between 1 and {SHORTLIST_SIZE}, "
+            f"got {CHOSEN_COACH_RANK!r}"
+        )
+
+    # --- reduce the player budget by the chosen coach's price
     # --- (coach_ranking.rank_coaches already fails loudly if any team in
     # --- the round has no coach at all -- this checks the price
     # --- specifically, since a team can have a coach name with no
     # --- Quotation in the price sheet) ---
-    ranked_coaches = rank_coaches(ROUND_GAMECODES_2025)
-    chosen_coach = ranked_coaches.iloc[0]
+    chosen_coach = shortlist.iloc[CHOSEN_COACH_RANK - 1]
     coach_name = chosen_coach["coach"]
     coach_team = chosen_coach["Team"]
     coach_price = chosen_coach["coach_price"]
+    coach_margin = chosen_coach["recent_avg_margin"]
 
     if pd.isna(coach_price):
         raise ValueError(
@@ -308,7 +340,10 @@ if __name__ == "__main__":
         )
 
     player_budget = BUDGET - coach_price
-    print(f"\nChosen coach: {coach_name} ({coach_team})")
+    print(
+        f"\nChosen coach (shortlist rank {CHOSEN_COACH_RANK}/{SHORTLIST_SIZE}): "
+        f"{coach_name} ({coach_team}) -- recent avg margin {coach_margin:.1f}"
+    )
     print(f"Coach price: {coach_price:.1f}")
     print(f"Remaining player budget: {BUDGET} - {coach_price:.1f} = {player_budget:.1f}")
 
