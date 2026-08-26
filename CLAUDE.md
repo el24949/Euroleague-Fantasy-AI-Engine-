@@ -83,6 +83,7 @@ Live target is 2026-27 (unplayed); 2023 is the validation ground.
 METHOD THAT WORKS: smallest verifiable slice → hand-check the numbers myself →
 commit → next. Every feature is judged against test MAE on an identical time-based
 split. No hand-tuned weights; the model decides.
+KEY FINDING: risk-aware optimization (objective = predicted − λ·consistency_5) beats naive. λ≈0.25 → 112.4 vs naive 106.9, 14/23 rounds. The edge is avoiding volatile busts, NOT better prediction. λ is data-specific (peak for 2025 rounds 12–34); re-tune with more seasons
 
 
 

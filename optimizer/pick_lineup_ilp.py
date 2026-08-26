@@ -35,6 +35,20 @@ season-to-date average or a random baseline -- without duplicating this
 MILP. score_col is deliberately a parameter rather than a hardcoded
 "predicted_score" for exactly that reason.
 
+RISK-AWARE OBJECTIVE: the engine solves against objective_score =
+predicted_score - RISK_LAMBDA * consistency_5, not raw predicted_score.
+consistency_5 (a player's rolling std of fantasy score -- how volatile
+they've been, not how good) is already a leakage-free feature computed by
+model_v3.train_and_predict() via add_rolling_form (features/rolling_form.py)
+-- it survives untouched through attach_positions() and the price join
+below (neither drops columns), so it's just read off df_round, never
+recomputed or rejoined. RISK_LAMBDA=0.25 was tuned by sweeping
+backtest/simulate_many.py's LAMBDA values across Season 2025 rounds 12-34:
+avg actual points rose from 107.54 (LAMBDA=0, i.e. today's raw-predicted
+engine) to 112.39, and rounds beating the naive baseline rose from 10/23
+to 14/23. This is one season's worth of evidence -- re-validate against
+more seasons before trusting the exact value 0.25 long-term.
+
 Before the roster/lineup MILP runs, players listed in data/unavailable.csv
 (hand-edited, out/doubtful for the upcoming round) are dropped from
 df_round entirely -- they never enter player_vars, so the solver has no way
@@ -69,6 +83,12 @@ from scoring.season_rules import get_rules
 
 SCORING_WEIGHT = 1.0
 BENCH_WEIGHT = 0.5
+
+# Tuned via backtest/simulate_many.py's LAMBDA sweep on Season 2025 rounds
+# 12-34: avg actual points 107.54 -> 112.39, rounds beating naive 10/23 ->
+# 14/23 at LAMBDA=0.25. One season of evidence -- re-validate with more
+# seasons before treating 0.25 as settled.
+RISK_LAMBDA = 0.25
 
 # One real, complete Season 2025 round: 10 consecutive Gamecodes, 20 distinct
 # teams with no repeats (verified against boxscores), fully inside
@@ -255,7 +275,26 @@ if __name__ == "__main__":
     season = get_round_season(df_round)
     captain_multiplier = get_rules(season)["captain_multiplier"]
 
-    result = solve_lineup(df_round, "predicted_score", captain_multiplier)
+    # --- risk-aware objective: predicted_score - RISK_LAMBDA * consistency_5.
+    # --- consistency_5 is guaranteed non-null pool-wide by model_v3's own
+    # --- dropna(subset=feature_cols) (prediction/model_v3.py), the same
+    # --- upstream guarantee attach_positions() gives 'position' -- but
+    # --- checked explicitly here, before it's used as an LP coefficient,
+    # --- rather than letting a NaN silently corrupt the objective or crash
+    # --- deep inside solve_lineup with a confusing PuLP error ---
+    missing_consistency = df_round["consistency_5"].isna()
+    if missing_consistency.any():
+        raise ValueError(
+            f"{missing_consistency.sum()} candidate(s) have no consistency_5, "
+            f"which should be impossible -- model_v3.train_and_predict()'s own "
+            f"dropna(subset=feature_cols) must have a bug: "
+            f"{df_round.loc[missing_consistency, 'Player'].tolist()}"
+        )
+    df_round["objective_score"] = (
+        df_round["predicted_score"] - RISK_LAMBDA * df_round["consistency_5"]
+    )
+
+    result = solve_lineup(df_round, "objective_score", captain_multiplier)
     status = result["status"]
     active_formation = result["formation"]
     starters_idx = result["starters_idx"]
@@ -292,11 +331,14 @@ if __name__ == "__main__":
     display["Player"] = display["Player"] + display.index.to_series().apply(
         lambda idx: " (C)" if idx == captain_idx else ""
     )
-    columns = ["Player", "position", "price", "predicted_score"]
+    # predicted_score, consistency_5, and objective_score shown side by side
+    # so the risk penalty's effect on picks is visible, not just its result
+    columns = ["Player", "position", "price", "predicted_score", "consistency_5", "objective_score"]
 
     print(f"Solver status: {status}")
     print(f"Formation: {active_formation}")
     print(f"Season: {season}, captain_multiplier: {captain_multiplier}")
+    print(f"RISK_LAMBDA: {RISK_LAMBDA}")
 
     print("\nStarting five:")
     print(display.loc[starters_idx, columns].to_string(index=False))
@@ -307,12 +349,19 @@ if __name__ == "__main__":
     print("\nBench (50%):")
     print(display.loc[bench_idx, columns].to_string(index=False))
 
-    captain_score = df_round.loc[captain_idx, "predicted_score"]
-    weighted_total = (
+    captain_predicted = df_round.loc[captain_idx, "predicted_score"]
+    weighted_predicted_total = (
         df_round.loc[starters_idx + sixth_idx, "predicted_score"].sum() * SCORING_WEIGHT
         + df_round.loc[bench_idx, "predicted_score"].sum() * BENCH_WEIGHT
-        + (captain_multiplier - 1) * captain_score
+        + (captain_multiplier - 1) * captain_predicted
+    )
+    captain_objective = df_round.loc[captain_idx, "objective_score"]
+    weighted_objective_total = (
+        df_round.loc[starters_idx + sixth_idx, "objective_score"].sum() * SCORING_WEIGHT
+        + df_round.loc[bench_idx, "objective_score"].sum() * BENCH_WEIGHT
+        + (captain_multiplier - 1) * captain_objective
     )
     total_quotation = df_round.loc[roster_idx, "price"].sum()
     print(f"\nTotal quotation used: {total_quotation:.1f} / {BUDGET}")
-    print(f"Weighted total predicted score: {weighted_total:.2f}")
+    print(f"Weighted total predicted score (raw upside): {weighted_predicted_total:.2f}")
+    print(f"Weighted total objective score (what the solver actually optimized): {weighted_objective_total:.2f}")
