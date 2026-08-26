@@ -27,6 +27,14 @@ recomputed. Positions are real (see pick_team.py's docstring); prices are
 real quotations from the price sheet, joined on Player_ID; club is real
 data -- same as pick_team_ilp.py.
 
+The MILP itself lives in solve_lineup(df_round, score_col, ...) so
+backtest/simulate_round.py can reuse the exact same roster+lineup
+constraints (4G/4F/2C, budget, max 6/club, formations, 6th man, captain)
+while optimizing a *different* per-player score column -- e.g. a naive
+season-to-date average or a random baseline -- without duplicating this
+MILP. score_col is deliberately a parameter rather than a hardcoded
+"predicted_score" for exactly that reason.
+
 Before the roster/lineup MILP runs, players listed in data/unavailable.csv
 (hand-edited, out/doubtful for the upcoming round) are dropped from
 df_round entirely -- they never enter player_vars, so the solver has no way
@@ -77,6 +85,130 @@ FORMATIONS = {
     "3-1-1": {"G": 3, "F": 1, "C": 1},
 }
 
+
+def solve_lineup(
+    df_round,
+    score_col,
+    captain_multiplier,
+    budget=BUDGET,
+    max_per_club=MAX_PER_CLUB,
+    scoring_weight=SCORING_WEIGHT,
+    bench_weight=BENCH_WEIGHT,
+):
+    """Solve the roster+lineup MILP over df_round, maximizing score_col.
+
+    df_round must already have 'position', 'price', 'Team', and score_col
+    columns, and a unique index (used as the player identifier throughout).
+    Returns a dict of index lists/labels describing the selection -- never
+    a printed report, so callers (this file's __main__ block,
+    backtest/simulate_round.py) can format the result however they need.
+    """
+    prob = pulp.LpProblem("euroleague_fantasy_lineup", pulp.LpMaximize)
+
+    player_vars = {idx: pulp.LpVariable(f"roster_{idx}", cat="Binary") for idx in df_round.index}
+    starter_vars = {idx: pulp.LpVariable(f"starter_{idx}", cat="Binary") for idx in df_round.index}
+    sixth_man_vars = {
+        idx: pulp.LpVariable(f"sixth_{idx}", cat="Binary") for idx in df_round.index
+    }
+    formation_vars = {f: pulp.LpVariable(f"formation_{f}", cat="Binary") for f in FORMATIONS}
+    captain_vars = {idx: pulp.LpVariable(f"captain_{idx}", cat="Binary") for idx in df_round.index}
+
+    # --- roster constraints, unchanged from pick_team_ilp.py ---
+    for position, count in POSITION_REQUIREMENTS.items():
+        prob += (
+            pulp.lpSum(
+                player_vars[idx]
+                for idx in df_round.index
+                if df_round.loc[idx, "position"] == position
+            )
+            == count
+        )
+
+    prob += (
+        pulp.lpSum(player_vars[idx] * df_round.loc[idx, "price"] for idx in df_round.index)
+        <= budget
+    )
+
+    for club in df_round["Team"].unique():
+        prob += (
+            pulp.lpSum(
+                player_vars[idx] for idx in df_round.index if df_round.loc[idx, "Team"] == club
+            )
+            <= max_per_club
+        )
+
+    # --- scoring-group membership: only rostered players can start or be 6th man ---
+    for idx in df_round.index:
+        prob += starter_vars[idx] <= player_vars[idx]
+        prob += sixth_man_vars[idx] <= player_vars[idx]
+        prob += starter_vars[idx] + sixth_man_vars[idx] <= 1
+
+    prob += pulp.lpSum(starter_vars.values()) == 5
+    prob += pulp.lpSum(sixth_man_vars.values()) == 1
+
+    # --- captain: exactly one, must be a starter (ASSUMPTION, see module docstring --
+    # --- verify against the live app whether a bench/6th-man player can be captained) ---
+    for idx in df_round.index:
+        prob += captain_vars[idx] <= starter_vars[idx]
+    prob += pulp.lpSum(captain_vars.values()) == 1
+
+    # --- exactly one formation, and starters' position mix must match it ---
+    prob += pulp.lpSum(formation_vars.values()) == 1
+
+    for position in POSITION_REQUIREMENTS:
+        prob += (
+            pulp.lpSum(
+                starter_vars[idx]
+                for idx in df_round.index
+                if df_round.loc[idx, "position"] == position
+            )
+            == pulp.lpSum(formation_vars[f] * FORMATIONS[f][position] for f in FORMATIONS)
+        )
+
+    # --- objective: 100% scoring group (starters + 6th man) + 50% bench, plus the
+    # --- captain's *extra* (multiplier - 1) share on top of their already-counted 100% ---
+    scoring_group_score = pulp.lpSum(
+        df_round.loc[idx, score_col] * (starter_vars[idx] + sixth_man_vars[idx])
+        for idx in df_round.index
+    )
+    bench_score = pulp.lpSum(
+        df_round.loc[idx, score_col]
+        * (player_vars[idx] - starter_vars[idx] - sixth_man_vars[idx])
+        for idx in df_round.index
+    )
+    captain_bonus = pulp.lpSum(
+        df_round.loc[idx, score_col] * captain_vars[idx] for idx in df_round.index
+    )
+    prob += (
+        scoring_weight * scoring_group_score
+        + bench_weight * bench_score
+        + (captain_multiplier - 1) * captain_bonus
+    )
+
+    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    status = pulp.LpStatus[prob.status]
+
+    starters_idx = [idx for idx in df_round.index if starter_vars[idx].value() == 1]
+    sixth_idx = [idx for idx in df_round.index if sixth_man_vars[idx].value() == 1]
+    bench_idx = [
+        idx
+        for idx in df_round.index
+        if player_vars[idx].value() == 1 and idx not in starters_idx and idx not in sixth_idx
+    ]
+    active_formation = next(f for f in FORMATIONS if formation_vars[f].value() == 1)
+    captain_idx = next(idx for idx in df_round.index if captain_vars[idx].value() == 1)
+
+    return {
+        "status": status,
+        "formation": active_formation,
+        "starters_idx": starters_idx,
+        "sixth_idx": sixth_idx,
+        "bench_idx": bench_idx,
+        "captain_idx": captain_idx,
+        "roster_idx": starters_idx + sixth_idx + bench_idx,
+    }
+
+
 if __name__ == "__main__":
     model, feature_cols, train, test = train_and_predict()
 
@@ -123,107 +255,14 @@ if __name__ == "__main__":
     season = get_round_season(df_round)
     captain_multiplier = get_rules(season)["captain_multiplier"]
 
-    prob = pulp.LpProblem("euroleague_fantasy_lineup", pulp.LpMaximize)
-
-    player_vars = {
-        idx: pulp.LpVariable(f"roster_{idx}", cat="Binary") for idx in df_round.index
-    }
-    starter_vars = {
-        idx: pulp.LpVariable(f"starter_{idx}", cat="Binary") for idx in df_round.index
-    }
-    sixth_man_vars = {
-        idx: pulp.LpVariable(f"sixth_{idx}", cat="Binary") for idx in df_round.index
-    }
-    formation_vars = {f: pulp.LpVariable(f"formation_{f}", cat="Binary") for f in FORMATIONS}
-    captain_vars = {
-        idx: pulp.LpVariable(f"captain_{idx}", cat="Binary") for idx in df_round.index
-    }
-
-    # --- roster constraints, unchanged from pick_team_ilp.py ---
-    for position, count in POSITION_REQUIREMENTS.items():
-        prob += (
-            pulp.lpSum(
-                player_vars[idx]
-                for idx in df_round.index
-                if df_round.loc[idx, "position"] == position
-            )
-            == count
-        )
-
-    prob += (
-        pulp.lpSum(player_vars[idx] * df_round.loc[idx, "price"] for idx in df_round.index)
-        <= BUDGET
-    )
-
-    for club in df_round["Team"].unique():
-        prob += (
-            pulp.lpSum(
-                player_vars[idx] for idx in df_round.index if df_round.loc[idx, "Team"] == club
-            )
-            <= MAX_PER_CLUB
-        )
-
-    # --- scoring-group membership: only rostered players can start or be 6th man ---
-    for idx in df_round.index:
-        prob += starter_vars[idx] <= player_vars[idx]
-        prob += sixth_man_vars[idx] <= player_vars[idx]
-        prob += starter_vars[idx] + sixth_man_vars[idx] <= 1
-
-    prob += pulp.lpSum(starter_vars.values()) == 5
-    prob += pulp.lpSum(sixth_man_vars.values()) == 1
-
-    # --- captain: exactly one, must be a starter (ASSUMPTION, see module docstring --
-    # --- verify against the live app whether a bench/6th-man player can be captained) ---
-    for idx in df_round.index:
-        prob += captain_vars[idx] <= starter_vars[idx]
-    prob += pulp.lpSum(captain_vars.values()) == 1
-
-    # --- exactly one formation, and starters' position mix must match it ---
-    prob += pulp.lpSum(formation_vars.values()) == 1
-
-    for position in POSITION_REQUIREMENTS:
-        prob += (
-            pulp.lpSum(
-                starter_vars[idx]
-                for idx in df_round.index
-                if df_round.loc[idx, "position"] == position
-            )
-            == pulp.lpSum(formation_vars[f] * FORMATIONS[f][position] for f in FORMATIONS)
-        )
-
-    # --- objective: 100% scoring group (starters + 6th man) + 50% bench, plus the
-    # --- captain's *extra* (multiplier - 1) share on top of their already-counted 100% ---
-    scoring_group_score = pulp.lpSum(
-        df_round.loc[idx, "predicted_score"] * (starter_vars[idx] + sixth_man_vars[idx])
-        for idx in df_round.index
-    )
-    bench_score = pulp.lpSum(
-        df_round.loc[idx, "predicted_score"]
-        * (player_vars[idx] - starter_vars[idx] - sixth_man_vars[idx])
-        for idx in df_round.index
-    )
-    captain_bonus = pulp.lpSum(
-        df_round.loc[idx, "predicted_score"] * captain_vars[idx] for idx in df_round.index
-    )
-    prob += (
-        SCORING_WEIGHT * scoring_group_score
-        + BENCH_WEIGHT * bench_score
-        + (captain_multiplier - 1) * captain_bonus
-    )
-
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
-    status = pulp.LpStatus[prob.status]
-
-    starters_idx = [idx for idx in df_round.index if starter_vars[idx].value() == 1]
-    sixth_idx = [idx for idx in df_round.index if sixth_man_vars[idx].value() == 1]
-    bench_idx = [
-        idx
-        for idx in df_round.index
-        if player_vars[idx].value() == 1 and idx not in starters_idx and idx not in sixth_idx
-    ]
-    active_formation = next(f for f in FORMATIONS if formation_vars[f].value() == 1)
-    captain_idx = next(idx for idx in df_round.index if captain_vars[idx].value() == 1)
-    roster_idx = starters_idx + sixth_idx + bench_idx
+    result = solve_lineup(df_round, "predicted_score", captain_multiplier)
+    status = result["status"]
+    active_formation = result["formation"]
+    starters_idx = result["starters_idx"]
+    sixth_idx = result["sixth_idx"]
+    bench_idx = result["bench_idx"]
+    captain_idx = result["captain_idx"]
+    roster_idx = result["roster_idx"]
 
     # --- fail loudly rather than silently defaulting, if the solver somehow
     # --- selected a candidate with no price (shouldn't happen -- they were
