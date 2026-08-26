@@ -23,6 +23,17 @@ import pandas as pd
 from prediction.model_v3 import train_and_predict
 
 ROUND_GAMECODES = range(253, 262)  # one verified full round: 9 games, 18 teams, in the test set
+
+# One real, complete Season 2025 round: 10 consecutive Gamecodes, 20 distinct
+# teams with no repeats (verified against boxscores), fully inside
+# model_v3's test range (Gamecode >= CUTOFF_GAMECODE = 304). Unlike
+# ROUND_GAMECODES above (calibrated to the 2023 test set's 9-games/18-teams
+# round shape), 2025 has 20 teams, so a round is 10 games. Lives here
+# (rather than in pick_lineup_ilp.py, where it used to be) so both
+# pick_lineup_ilp.py and coach_ranking.py can import it without an import
+# cycle between those two files.
+ROUND_GAMECODES_2025 = range(311, 321)
+
 POSITION_REQUIREMENTS = {"G": 4, "F": 4, "C": 2}
 
 

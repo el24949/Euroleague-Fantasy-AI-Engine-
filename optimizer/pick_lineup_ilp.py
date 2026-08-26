@@ -49,6 +49,18 @@ engine) to 112.39, and rounds beating the naive baseline rose from 10/23
 to 14/23. This is one season's worth of evidence -- re-validate against
 more seasons before trusting the exact value 0.25 long-term.
 
+COACH WIRING: before solving, this file picks a coach via
+coach_ranking.rank_coaches(ROUND_GAMECODES_2025) -- the SAME ranking that
+file prints standalone -- and takes the #1-ranked team's coach as "the
+chosen coach" for this round. Their price (coach_ranking.load_coach_info(),
+itself load_prices()'s excluded['head_coaches'] Quotation, never
+reparsed) is subtracted from BUDGET before solve_lineup() runs, so the 10
+players are optimized under (BUDGET - coach_price) credits, not the full
+100 -- the coach occupies a budget slot exactly like a player would, just
+outside the 4G/4F/2C roster shape. Every other constraint (positions,
+max 6/club, formations, 6th man, captain, RISK_LAMBDA) is untouched --
+only the budget value passed into solve_lineup() changes.
+
 Before the roster/lineup MILP runs, players listed in data/unavailable.csv
 (hand-edited, out/doubtful for the upcoming round) are dropped from
 df_round entirely -- they never enter player_vars, so the solver has no way
@@ -61,8 +73,10 @@ while joining current-season prices, a mismatch that excluded dozens of
 players who'd since retired or left EuroLeague -- see git history for that
 version). model_v3.train_and_predict() now trains and tests entirely within
 Season 2025 (prediction/model_v3.py), so its `test` DataFrame is already
-100% Season 2025 by construction. ROUND_GAMECODES_2025 below picks one real
-round from within that test range (Gamecode >= model_v3.CUTOFF_GAMECODE),
+100% Season 2025 by construction. ROUND_GAMECODES_2025 (optimizer/pick_team.py
+-- moved there so coach_ranking.py can import it too, without an import
+cycle between this file and that one) picks one real round from within
+that test range (Gamecode >= model_v3.CUTOFF_GAMECODE),
 and df_round still filters on Season == 2025 explicitly rather than relying
 on that invariant -- if train_and_predict's split logic ever changes to mix
 seasons again, this file fails loudly (via get_round_season's assertion)
@@ -72,11 +86,18 @@ load_prices' own report (currently 354/355 real Season=2025 players
 priced).
 """
 
+import pandas as pd
 import pulp
 
 from data_collection.load_prices import load_prices
 from optimizer.availability import load_unavailable
-from optimizer.pick_team import POSITION_REQUIREMENTS, attach_positions, get_round_season
+from optimizer.coach_ranking import rank_coaches
+from optimizer.pick_team import (
+    POSITION_REQUIREMENTS,
+    ROUND_GAMECODES_2025,
+    attach_positions,
+    get_round_season,
+)
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
 from prediction.model_v3 import train_and_predict
 from scoring.season_rules import get_rules
@@ -89,13 +110,6 @@ BENCH_WEIGHT = 0.5
 # 14/23 at LAMBDA=0.25. One season of evidence -- re-validate with more
 # seasons before treating 0.25 as settled.
 RISK_LAMBDA = 0.25
-
-# One real, complete Season 2025 round: 10 consecutive Gamecodes, 20 distinct
-# teams with no repeats (verified against boxscores), fully inside
-# model_v3's test range (Gamecode >= CUTOFF_GAMECODE = 304). Unlike the old
-# ROUND_GAMECODES (optimizer/pick_team.py, calibrated to the 2023 test set's
-# 9-games/18-teams round shape), 2025 has 20 teams, so a round is 10 games.
-ROUND_GAMECODES_2025 = range(311, 321)
 
 FORMATIONS = {
     "2-2-1": {"G": 2, "F": 2, "C": 1},
@@ -275,6 +289,29 @@ if __name__ == "__main__":
     season = get_round_season(df_round)
     captain_multiplier = get_rules(season)["captain_multiplier"]
 
+    # --- choose a coach: the #1 team in coach_ranking's own shortlist for
+    # --- this exact round, then reduce the player budget by their price
+    # --- (coach_ranking.rank_coaches already fails loudly if any team in
+    # --- the round has no coach at all -- this checks the price
+    # --- specifically, since a team can have a coach name with no
+    # --- Quotation in the price sheet) ---
+    ranked_coaches = rank_coaches(ROUND_GAMECODES_2025)
+    chosen_coach = ranked_coaches.iloc[0]
+    coach_name = chosen_coach["coach"]
+    coach_team = chosen_coach["Team"]
+    coach_price = chosen_coach["coach_price"]
+
+    if pd.isna(coach_price):
+        raise ValueError(
+            f"Chosen coach {coach_name} ({coach_team}) has no price in the "
+            f"price sheet -- cannot reduce the player budget."
+        )
+
+    player_budget = BUDGET - coach_price
+    print(f"\nChosen coach: {coach_name} ({coach_team})")
+    print(f"Coach price: {coach_price:.1f}")
+    print(f"Remaining player budget: {BUDGET} - {coach_price:.1f} = {player_budget:.1f}")
+
     # --- risk-aware objective: predicted_score - RISK_LAMBDA * consistency_5.
     # --- consistency_5 is guaranteed non-null pool-wide by model_v3's own
     # --- dropna(subset=feature_cols) (prediction/model_v3.py), the same
@@ -294,7 +331,7 @@ if __name__ == "__main__":
         df_round["predicted_score"] - RISK_LAMBDA * df_round["consistency_5"]
     )
 
-    result = solve_lineup(df_round, "objective_score", captain_multiplier)
+    result = solve_lineup(df_round, "objective_score", captain_multiplier, budget=player_budget)
     status = result["status"]
     active_formation = result["formation"]
     starters_idx = result["starters_idx"]
@@ -327,27 +364,53 @@ if __name__ == "__main__":
             f"{df_round.loc[roster_idx][missing_position]['Player'].tolist()}"
         )
 
-    display = df_round.copy()
-    display["Player"] = display["Player"] + display.index.to_series().apply(
-        lambda idx: " (C)" if idx == captain_idx else ""
-    )
-    # predicted_score, consistency_5, and objective_score shown side by side
-    # so the risk penalty's effect on picks is visible, not just its result
-    columns = ["Player", "position", "price", "predicted_score", "consistency_5", "objective_score"]
-
-    print(f"Solver status: {status}")
+    print(f"\nSolver status: {status}")
     print(f"Formation: {active_formation}")
     print(f"Season: {season}, captain_multiplier: {captain_multiplier}")
     print(f"RISK_LAMBDA: {RISK_LAMBDA}")
 
-    print("\nStarting five:")
-    print(display.loc[starters_idx, columns].to_string(index=False))
+    # --- one combined 11-slot table: coach + the 10 players, each player's
+    # --- role shown explicitly (role replaces the old three separate
+    # --- Starting five / 6th man / Bench blocks) ---
+    role_by_idx = {}
+    for idx in starters_idx:
+        role_by_idx[idx] = "Starter"
+    for idx in sixth_idx:
+        role_by_idx[idx] = "6th Man"
+    for idx in bench_idx:
+        role_by_idx[idx] = "Bench"
+    role_order = {"Coach": 0, "Starter": 1, "6th Man": 2, "Bench": 3}
 
-    print("\n6th man:")
-    print(display.loc[sixth_idx, columns].to_string(index=False))
+    players_table = df_round.loc[roster_idx].copy()
+    players_table["role"] = players_table.index.map(role_by_idx)
+    players_table["Player"] = players_table["Player"] + players_table.index.to_series().apply(
+        lambda idx: " (C)" if idx == captain_idx else ""
+    )
 
-    print("\nBench (50%):")
-    print(display.loc[bench_idx, columns].to_string(index=False))
+    # predicted_score, consistency_5, and objective_score shown side by side
+    # so the risk penalty's effect on picks is visible, not just its result.
+    # The coach has none of these -- fantasy scoring only weighs players --
+    # so its row leaves them blank (NaN) rather than a fabricated 0.
+    coach_row = pd.DataFrame(
+        [
+            {
+                "Player": f"{coach_name} ({coach_team})",
+                "role": "Coach",
+                "position": "-",
+                "price": coach_price,
+                "predicted_score": float("nan"),
+                "consistency_5": float("nan"),
+                "objective_score": float("nan"),
+            }
+        ]
+    )
+
+    columns = ["Player", "role", "position", "price", "predicted_score", "consistency_5", "objective_score"]
+    full_team = pd.concat([coach_row, players_table[columns]], ignore_index=True)
+    full_team = full_team.sort_values(by="role", key=lambda col: col.map(role_order))
+
+    print(f"\nFull 11-slot team:")
+    print(full_team[columns].to_string(index=False))
 
     captain_predicted = df_round.loc[captain_idx, "predicted_score"]
     weighted_predicted_total = (
@@ -362,6 +425,8 @@ if __name__ == "__main__":
         + (captain_multiplier - 1) * captain_objective
     )
     total_quotation = df_round.loc[roster_idx, "price"].sum()
-    print(f"\nTotal quotation used: {total_quotation:.1f} / {BUDGET}")
+    total_squad_cost = coach_price + total_quotation
+    print(f"\nPlayer quotation used: {total_quotation:.1f} / {player_budget:.1f}")
+    print(f"Total squad cost (coach + players): {total_squad_cost:.1f} / {BUDGET}")
     print(f"Weighted total predicted score (raw upside): {weighted_predicted_total:.2f}")
     print(f"Weighted total objective score (what the solver actually optimized): {weighted_objective_total:.2f}")

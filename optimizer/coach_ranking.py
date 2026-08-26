@@ -10,10 +10,15 @@ add_team_rolling_defense specifically so this file's real-points margin
 and the existing fantasy-conceded feature share the same opponent-matching
 self-merge instead of two separate reimplementations), load_prices
 (data_collection/load_prices.py -- its excluded['head_coaches'] already
-holds every team's coach, parsed out of the price sheet; not reparsed
-here), and ROUND_GAMECODES_2025 (optimizer/pick_lineup_ilp.py -- the same
-live target round the optimizer itself uses, not a new one picked here) --
-nothing here is recomputed.
+holds every team's coach AND their Quotation, parsed out of the price
+sheet; not reparsed here), and ROUND_GAMECODES_2025 (optimizer/pick_team.py
+-- the same live target round the optimizer itself uses, not a new one
+picked here) -- nothing here is recomputed.
+
+rank_coaches() is the reusable entry point: optimizer/pick_lineup_ilp.py
+imports it to pick a coach (and their price) for the live lineup, so
+"reuse it, don't recompute" applies to that file too -- see its own
+docstring for how the two fit together.
 
 LEAKAGE-FREE ROLLING MARGIN: for each team-game, margin = own Points -
 opponent's Points (from match_opponents). rolling_5_margin is shift(1) +
@@ -55,7 +60,7 @@ import pandas as pd
 
 from data_collection.load_prices import load_prices
 from features.matchup import match_opponents
-from optimizer.pick_lineup_ilp import ROUND_GAMECODES_2025
+from optimizer.pick_team import ROUND_GAMECODES_2025
 
 DB_PATH = "data/euroleague.db"
 SEASON = 2025
@@ -119,11 +124,11 @@ def load_home_flags(boxscores):
     return boxscores.groupby(["Season", "Gamecode", "Team"])["Home"].first().reset_index()
 
 
-def load_coaches():
-    """boxscores-code Team -> coach full name. load_prices()'s
-    excluded['head_coaches'] already parsed these out of the price sheet;
-    only remapped here through PRICE_SHEET_TEAM_CODE_MAP onto boxscores'
-    team codes, never reparsed."""
+def load_coach_info():
+    """boxscores-code Team -> coach name and price (columns: team_code,
+    coach, coach_price). load_prices()'s excluded['head_coaches'] already
+    parsed these out of the price sheet; only remapped here through
+    PRICE_SHEET_TEAM_CODE_MAP onto boxscores' team codes, never reparsed."""
     _, excluded = load_prices()
     coaches = excluded["head_coaches"].copy()
     coaches["team_code"] = coaches["Team"].map(PRICE_SHEET_TEAM_CODE_MAP)
@@ -135,18 +140,27 @@ def load_coaches():
             f"{coaches.loc[unmapped, 'Team'].tolist()}"
         )
 
-    coach_name = coaches["Name"].str.strip() + " " + coaches["Surname"].str.strip()
-    return dict(zip(coaches["team_code"], coach_name))
+    coaches["coach"] = coaches["Name"].str.strip() + " " + coaches["Surname"].str.strip()
+    coaches = coaches.rename(columns={"Quotation": "coach_price"})
+    return coaches[["team_code", "coach", "coach_price"]]
 
 
-if __name__ == "__main__":
-    boxscores = load_season_boxscores()
+def rank_coaches(round_gamecodes, boxscores=None):
+    """Build the full (Team, coach, coach_price, recent_avg_margin,
+    opponent, Home) ranking for round_gamecodes, sorted by recent-margin
+    descending with home status as a tiebreaker (see module docstring's
+    RANKING ORDER note). Returns the whole ranked DataFrame, not just the
+    printed shortlist, so callers like optimizer/pick_lineup_ilp.py can
+    take the top row as "the chosen coach" without re-deriving any of this.
+    """
+    if boxscores is None:
+        boxscores = load_season_boxscores()
 
     matchup = compute_rolling_margin(boxscores)
     home_flags = load_home_flags(boxscores)
-    coach_lookup = load_coaches()
+    coach_info = load_coach_info()
 
-    target_round = matchup[matchup["Gamecode"].isin(ROUND_GAMECODES_2025)].copy()
+    target_round = matchup[matchup["Gamecode"].isin(round_gamecodes)].copy()
     target_round = target_round.merge(home_flags, on=["Season", "Gamecode", "Team"], how="left")
 
     # --- fail loudly rather than silently ranking with a missing value ---
@@ -158,7 +172,9 @@ if __name__ == "__main__":
             f"{target_round.loc[missing_margin, 'Team'].tolist()}"
         )
 
-    target_round["coach"] = target_round["Team"].map(coach_lookup)
+    target_round = target_round.merge(
+        coach_info, left_on="Team", right_on="team_code", how="left"
+    ).drop(columns="team_code")
     missing_coach = target_round["coach"].isna()
     if missing_coach.any():
         raise ValueError(
@@ -166,23 +182,26 @@ if __name__ == "__main__":
             f"{target_round.loc[missing_coach, 'Team'].tolist()}"
         )
 
-    # --- rank by recent-margin (primary), home status as tiebreaker only
-    # --- (see module docstring's RANKING ORDER note) ---
     target_round = target_round.sort_values(
         ["rolling_5_margin", "Home"], ascending=[False, False]
     ).reset_index(drop=True)
 
+    return target_round.rename(
+        columns={"rolling_5_margin": "recent_avg_margin", "Team_opp": "opponent"}
+    )
+
+
+if __name__ == "__main__":
     print(
         f"Target round: Season {SEASON}, Gamecode "
         f"{min(ROUND_GAMECODES_2025)}-{max(ROUND_GAMECODES_2025)}"
     )
 
-    display = target_round.copy()
+    ranked = rank_coaches(ROUND_GAMECODES_2025)
+
+    display = ranked.copy()
     display["Home"] = display["Home"].map({1: "Yes", 0: "No"})
-    display = display.rename(
-        columns={"rolling_5_margin": "recent_avg_margin", "Team_opp": "opponent"}
-    )
-    columns = ["Team", "coach", "recent_avg_margin", "opponent", "Home"]
+    columns = ["Team", "coach", "coach_price", "recent_avg_margin", "opponent", "Home"]
 
     print(f"\nAll {len(display)} teams playing this round, ranked by recent-margin (home as tiebreaker):")
     print(display[columns].to_string(index=False))
