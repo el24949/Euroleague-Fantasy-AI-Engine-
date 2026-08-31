@@ -65,6 +65,29 @@ shape. Every other constraint (positions, max 6/club, formations, 6th
 man, captain, RISK_LAMBDA) is untouched -- only the budget value passed
 into solve_lineup() changes.
 
+TURN COVERAGE (soft bonus, NOT a hard constraint): each Season 2025 round
+plays out over two turns, T1 and T2 (features/turn_tags.py -- a player's
+turn is just the turn of their team's game this round, joined via
+optimizer/turn_join.py's attach_turns onto (Season, Gamecode)). Within a
+position group (G/F/C), having at least one rostered T1 player AND at
+least one rostered T2 player gives the manager a real swap option if one
+of them has a bad game -- a same-position player from the OTHER turn to
+lean on, rather than being stuck with a single turn's outcome across that
+whole position group. This is rewarded, not required: TURN_COVERAGE_WEIGHT
+times a per-position "coverage achieved" binary is added to the objective,
+so the solver prefers spreading turns within a position group when it's
+cheap to do so, but can still ignore it entirely when chasing raw
+objective_score is better -- coverage_vars[position] is only ever bounded
+above by (T1 count, T2 count) in that position group, never forced to 1,
+so there is no way for this bonus to make the MILP infeasible. Coverage is
+checked over the full 10-man roster (player_vars), not just the starting
+five, since the swap option it represents (bench <-> starter, or a future
+round's lineup call) isn't limited to who's starting this round.
+TURN_COVERAGE_WEIGHT itself is a reasoned starting value, not backtested
+-- see its definition below for the reasoning. RISK_LAMBDA and every other
+constraint (positions, budget, max 6/club, formations, 6th man, captain)
+are unchanged.
+
 Before the roster/lineup MILP runs, players listed in data/unavailable.csv
 (hand-edited, out/doubtful for the upcoming round) are dropped from
 df_round entirely -- they never enter player_vars, so the solver has no way
@@ -94,6 +117,7 @@ import pandas as pd
 import pulp
 
 from data_collection.load_prices import load_prices
+from features.turn_tags import build_turn_lookup
 from optimizer.availability import load_unavailable
 from optimizer.coach_ranking import SHORTLIST_SIZE, rank_coaches
 from optimizer.pick_team import (
@@ -103,6 +127,7 @@ from optimizer.pick_team import (
     get_round_season,
 )
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
+from optimizer.turn_join import attach_turns
 from prediction.model_v3 import train_and_predict
 from scoring.season_rules import get_rules
 
@@ -114,6 +139,17 @@ BENCH_WEIGHT = 0.5
 # 14/23 at LAMBDA=0.25. One season of evidence -- re-validate with more
 # seasons before treating 0.25 as settled.
 RISK_LAMBDA = 0.25
+
+# Soft bonus per position group (G/F/C) that has both a T1 and a T2
+# rostered player -- max possible bonus is 3 * TURN_COVERAGE_WEIGHT (all
+# three groups covered). REASONED, NOT BACKTESTED: chosen small relative
+# to typical predicted_score values (individual players commonly ~5-20)
+# and RISK_LAMBDA's effect (0.25 * consistency_5, typically ~1-2 points of
+# penalty) so it acts as a tiebreaker among near-equal rosters rather than
+# overriding score-driven picks. Re-tune (or backtest properly, the way
+# RISK_LAMBDA was via backtest/simulate_many.py) before trusting this
+# value long-term.
+TURN_COVERAGE_WEIGHT = 0.5
 
 # Which row of coach_ranking's top-SHORTLIST_SIZE shortlist to use as the
 # chosen coach: 1 = #1 team by recent-margin (the default), up to
@@ -138,6 +174,7 @@ def solve_lineup(
     max_per_club=MAX_PER_CLUB,
     scoring_weight=SCORING_WEIGHT,
     bench_weight=BENCH_WEIGHT,
+    turn_coverage_weight=0.0,
 ):
     """Solve the roster+lineup MILP over df_round, maximizing score_col.
 
@@ -146,6 +183,13 @@ def solve_lineup(
     Returns a dict of index lists/labels describing the selection -- never
     a printed report, so callers (this file's __main__ block,
     backtest/simulate_round.py) can format the result however they need.
+
+    turn_coverage_weight defaults to 0.0 (no turn-coverage bonus, and no
+    'turn' column required) so existing callers -- backtest/simulate_round.py
+    passes none of df_round's rows a 'turn' -- keep working unchanged. Pass
+    TURN_COVERAGE_WEIGHT and a df_round with a 'turn' column (see
+    optimizer/turn_join.py's attach_turns) to turn the bonus on; see the
+    module docstring's TURN COVERAGE section for what it rewards.
     """
     prob = pulp.LpProblem("euroleague_fantasy_lineup", pulp.LpMaximize)
 
@@ -209,8 +253,43 @@ def solve_lineup(
             == pulp.lpSum(formation_vars[f] * FORMATIONS[f][position] for f in FORMATIONS)
         )
 
+    # --- turn coverage (soft bonus only -- see module docstring's TURN COVERAGE
+    # --- section). coverage_vars[position] is bounded above by BOTH the rostered
+    # --- T1 count and the rostered T2 count for that position group, so it can
+    # --- only reach 1 when at least one of each is on the roster -- but nothing
+    # --- forces it to 1, so an uncovered position group is merely un-bonused,
+    # --- never infeasible. ---
+    coverage_vars = {}
+    if turn_coverage_weight:
+        if "turn" not in df_round.columns:
+            raise ValueError(
+                "solve_lineup: turn_coverage_weight is nonzero but df_round has "
+                "no 'turn' column -- attach one first (optimizer/turn_join.py's "
+                "attach_turns)."
+            )
+        coverage_vars = {
+            position: pulp.LpVariable(f"turn_coverage_{position}", cat="Binary")
+            for position in POSITION_REQUIREMENTS
+        }
+        for position in POSITION_REQUIREMENTS:
+            t1_count = pulp.lpSum(
+                player_vars[idx]
+                for idx in df_round.index
+                if df_round.loc[idx, "position"] == position
+                and df_round.loc[idx, "turn"] == "T1"
+            )
+            t2_count = pulp.lpSum(
+                player_vars[idx]
+                for idx in df_round.index
+                if df_round.loc[idx, "position"] == position
+                and df_round.loc[idx, "turn"] == "T2"
+            )
+            prob += coverage_vars[position] <= t1_count
+            prob += coverage_vars[position] <= t2_count
+
     # --- objective: 100% scoring group (starters + 6th man) + 50% bench, plus the
-    # --- captain's *extra* (multiplier - 1) share on top of their already-counted 100% ---
+    # --- captain's *extra* (multiplier - 1) share on top of their already-counted
+    # --- 100%, plus the soft turn-coverage bonus (zero terms if turned off) ---
     scoring_group_score = pulp.lpSum(
         df_round.loc[idx, score_col] * (starter_vars[idx] + sixth_man_vars[idx])
         for idx in df_round.index
@@ -223,11 +302,14 @@ def solve_lineup(
     captain_bonus = pulp.lpSum(
         df_round.loc[idx, score_col] * captain_vars[idx] for idx in df_round.index
     )
-    prob += (
+    objective = (
         scoring_weight * scoring_group_score
         + bench_weight * bench_score
         + (captain_multiplier - 1) * captain_bonus
     )
+    if coverage_vars:
+        objective += turn_coverage_weight * pulp.lpSum(coverage_vars.values())
+    prob += objective
 
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
     status = pulp.LpStatus[prob.status]
@@ -242,6 +324,20 @@ def solve_lineup(
     active_formation = next(f for f in FORMATIONS if formation_vars[f].value() == 1)
     captain_idx = next(idx for idx in df_round.index if captain_vars[idx].value() == 1)
 
+    # --- read achieved coverage straight off the roster (not off
+    # --- coverage_vars' LP values) -- equivalent since a positive weight
+    # --- always pushes a feasible coverage_var to 1, but this way the
+    # --- reported coverage is trivially correct even if that ever changed ---
+    turn_coverage = {}
+    if coverage_vars:
+        roster_idx = starters_idx + sixth_idx + bench_idx
+        for position in coverage_vars:
+            group = df_round.loc[roster_idx]
+            group = group[group["position"] == position]
+            turn_coverage[position] = (group["turn"] == "T1").any() and (
+                group["turn"] == "T2"
+            ).any()
+
     return {
         "status": status,
         "formation": active_formation,
@@ -250,6 +346,7 @@ def solve_lineup(
         "bench_idx": bench_idx,
         "captain_idx": captain_idx,
         "roster_idx": starters_idx + sixth_idx + bench_idx,
+        "turn_coverage": turn_coverage,
     }
 
 
@@ -298,6 +395,20 @@ if __name__ == "__main__":
 
     season = get_round_season(df_round)
     captain_multiplier = get_rules(season)["captain_multiplier"]
+
+    # --- attach each candidate's turn (T1/T2/RESCHEDULED/NO_TURN_FOUND) for
+    # --- the turn-coverage bonus -- reuses turn_join.attach_turns and
+    # --- turn_tags.build_turn_lookup rather than rejoining the schedule here ---
+    turn_lookup = build_turn_lookup(season)
+    df_round = attach_turns(df_round, turn_lookup)
+    flagged_turns = df_round[df_round["turn"].isin(["RESCHEDULED", "NO_TURN_FOUND"])]
+    if len(flagged_turns):
+        flagged_names = flagged_turns[["Player", "Team", "turn"]].drop_duplicates()
+        print(
+            f"\n{len(flagged_names)} candidate(s) have no clean T1/T2 turn "
+            f"(excluded from the turn-coverage bonus, but NOT from the roster pool):"
+        )
+        print(flagged_names.to_string(index=False))
 
     # --- build the coach shortlist (same ranking coach_ranking.py prints
     # --- standalone) and show it before picking, so the options -- not
@@ -366,7 +477,13 @@ if __name__ == "__main__":
         df_round["predicted_score"] - RISK_LAMBDA * df_round["consistency_5"]
     )
 
-    result = solve_lineup(df_round, "objective_score", captain_multiplier, budget=player_budget)
+    result = solve_lineup(
+        df_round,
+        "objective_score",
+        captain_multiplier,
+        budget=player_budget,
+        turn_coverage_weight=TURN_COVERAGE_WEIGHT,
+    )
     status = result["status"]
     active_formation = result["formation"]
     starters_idx = result["starters_idx"]
@@ -374,6 +491,7 @@ if __name__ == "__main__":
     bench_idx = result["bench_idx"]
     captain_idx = result["captain_idx"]
     roster_idx = result["roster_idx"]
+    turn_coverage = result["turn_coverage"]
 
     # --- fail loudly rather than silently defaulting, if the solver somehow
     # --- selected a candidate with no price (shouldn't happen -- they were
@@ -432,6 +550,7 @@ if __name__ == "__main__":
                 "Player": f"{coach_name} ({coach_team})",
                 "role": "Coach",
                 "position": "-",
+                "turn": "-",
                 "price": coach_price,
                 "predicted_score": float("nan"),
                 "consistency_5": float("nan"),
@@ -440,12 +559,43 @@ if __name__ == "__main__":
         ]
     )
 
-    columns = ["Player", "role", "position", "price", "predicted_score", "consistency_5", "objective_score"]
+    columns = [
+        "Player",
+        "role",
+        "position",
+        "turn",
+        "price",
+        "predicted_score",
+        "consistency_5",
+        "objective_score",
+    ]
     full_team = pd.concat([coach_row, players_table[columns]], ignore_index=True)
     full_team = full_team.sort_values(by="role", key=lambda col: col.map(role_order))
 
     print(f"\nFull 11-slot team:")
     print(full_team[columns].to_string(index=False))
+
+    # --- per-position turn-coverage summary: shows the counts the bonus
+    # --- actually saw (T1 vs T2 rostered players per position group) next
+    # --- to whether coverage was achieved, so the bonus's effect is
+    # --- checkable, not just asserted ---
+    coverage_rows = []
+    for position in POSITION_REQUIREMENTS:
+        group = df_round.loc[roster_idx]
+        group = group[group["position"] == position]
+        coverage_rows.append(
+            {
+                "position": position,
+                "rostered": len(group),
+                "T1_count": (group["turn"] == "T1").sum(),
+                "T2_count": (group["turn"] == "T2").sum(),
+                "other_turn_count": (~group["turn"].isin(["T1", "T2"])).sum(),
+                "both_turns_covered": turn_coverage.get(position),
+            }
+        )
+    coverage_df = pd.DataFrame(coverage_rows)
+    print(f"\nTurn coverage by position (TURN_COVERAGE_WEIGHT={TURN_COVERAGE_WEIGHT}):")
+    print(coverage_df.to_string(index=False))
 
     captain_predicted = df_round.loc[captain_idx, "predicted_score"]
     weighted_predicted_total = (
