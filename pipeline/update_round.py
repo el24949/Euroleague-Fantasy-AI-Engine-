@@ -12,6 +12,18 @@ DELIBERATELY NOT IN THIS SLICE: price refresh, running the optimizer. This
 is the data-refresh skeleton only -- optimizer/pick_lineup_ilp.py still
 needs to be run separately once prices and this fresh data are in place.
 
+WHERE THE MANUAL PRICE STEP BELONGS: unlike box scores/positions/turns,
+there's no API for fantasy prices (login-gated) -- a person has to
+download that round's price Excel from the EuroLeague Fantasy site by
+hand and drop it at data/prices/round_NN/players_stats.xlsx before
+data_collection/load_prices_history.py can load it (see that file's own
+docstring). That has to happen BETWEEN this pipeline finishing and the
+optimizer running -- this file can compute which round number NN is (the
+next/upcoming round the status summary below already identifies) and say
+so, but can't do the download itself. status_summary() prints that
+reminder using the next_round it just computed, rather than leaving it as
+a comment only visible in this docstring.
+
 Reuses collect_season (data_collection/fetch_season.py), fetch_positions.py
 (data_collection/fetch_positions.py, imported rather than called -- see
 STEP 2 below), and build_turn_lookup/load_regular_season_schedule
@@ -158,6 +170,20 @@ def status_summary(season, db_path=DB_PATH):
         )
     else:
         print("Next/upcoming round: none -- every scheduled regular-season round is fully collected")
+
+    # --- MANUAL STEP: prices have no API (login-gated), so this can only
+    # --- name where the file belongs, not fetch it -- see module docstring's
+    # --- "WHERE THE MANUAL PRICE STEP BELONGS" section ---
+    print("\nManual step before running the optimizer:")
+    if next_round is not None:
+        print(
+            f"  Download round {next_round}'s price Excel from the EuroLeague Fantasy "
+            f"site and place it at data/prices/round_{next_round:02d}/players_stats.xlsx, "
+            f"then run `python -m data_collection.load_prices_history` to load it into "
+            f"the prices table (data_collection/load_prices_history.py)."
+        )
+    else:
+        print("  N/A -- no upcoming round to price (every scheduled round is fully collected).")
 
     return {
         "total_games": total_games,
