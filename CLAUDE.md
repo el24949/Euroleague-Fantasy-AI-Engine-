@@ -86,6 +86,7 @@ split. No hand-tuned weights; the model decides.
 KEY FINDING: risk-aware optimization (objective = predicted − λ·consistency_5) beats naive. λ≈0.25 → 112.4 vs naive 106.9, 14/23 rounds. The edge is avoiding volatile busts, NOT better prediction. λ is data-specific (peak for 2025 rounds 12–34); re-tune with more seasons
 OPTIMIZER: COMPLETE. Produces full legal 11-slot team (10 players + coach), 100/100 budget, risk-aware (λ=0.25). Coach via crude margin-ranking shortlist (auto-picks #1; human can override). All constraints live: positions, budget, 6/club, formations, 6th man, captain, coach budget deduction.
 
+Turn-awareness DONE: T1/T2 tagged from schedule dates; optimizer has soft per-position turn-coverage bonus (TURN_COVERAGE_WEIGHT=0.5, reasoned not backtested — payoff is via T1→T2 substitution, which the static optimizer doesn't simulate, so it can't be cleanly validated).
 
 
 
