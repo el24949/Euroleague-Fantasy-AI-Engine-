@@ -1,0 +1,33 @@
+source_file,rows,true_round,spearman_correlation,matched_players,filename_claimed_round,confidence
+players_stats (1).xlsx,34,,,,,"NOT A ROUND FILE (FPT all zero, only 2 team(s))"
+players_stats (10).xlsx,328,18.0,0.9990680670628242,218.0,,OK
+players_stats (11).xlsx,328,19.0,0.998775057049164,215.0,,OK
+players_stats (12).xlsx,332,20.0,0.9988898692226188,215.0,,OK
+players_stats (13).xlsx,333,21.0,0.8695853108439683,218.0,,UNCERTAIN (low corr)
+players_stats (14).xlsx,333,22.0,0.9986917753632112,222.0,,OK
+players_stats (15).xlsx,334,23.0,0.998214939974602,219.0,,OK
+players_stats (16).xlsx,334,24.0,0.9990480579746708,220.0,,OK
+players_stats (17).xlsx,335,25.0,0.9987383843364898,216.0,,OK
+players_stats (18).xlsx,339,26.0,0.9988949114586478,222.0,,OK
+players_stats (19).xlsx,339,27.0,0.9989600265506632,221.0,,OK
+players_stats (2).xlsx,34,,,,,NOT A ROUND FILE (only 2 team(s))
+players_stats (20).xlsx,339,28.0,0.9986491201131592,221.0,,OK
+players_stats (21).xlsx,340,29.0,0.9977076329339236,218.0,,OK
+players_stats (22).xlsx,345,30.0,0.7457841127848582,225.0,,UNCERTAIN (low corr)
+players_stats (23).xlsx,345,31.0,0.998346593811101,224.0,,OK
+players_stats (24).xlsx,345,32.0,0.9950840822043276,222.0,,OK
+players_stats (25).xlsx,345,33.0,0.8606899276648574,225.0,,UNCERTAIN (low corr)
+players_stats (26).xlsx,345,34.0,0.858663123361048,226.0,,UNCERTAIN (low corr)
+players_stats (27).xlsx,345,35.0,0.9991037657795634,225.0,,OK
+players_stats (28).xlsx,345,36.0,0.9991820804462764,223.0,,OK
+players_stats (3).xlsx,34,,,,,NOT A ROUND FILE (only 2 team(s))
+players_stats (4).xlsx,34,,,,,NOT A ROUND FILE (only 2 team(s))
+players_stats (5).xlsx,34,,,,,NOT A ROUND FILE (only 2 team(s))
+players_stats (5)r10.xlsx,319,13.0,0.9985175756307472,213.0,10.0,OK
+players_stats (6).xlsx,34,,,,,"NOT A ROUND FILE (FPT all zero, only 2 team(s))"
+players_stats (7).xlsx,34,,,,,NOT A ROUND FILE (only 2 team(s))
+players_stats (7)r12.xlsx,322,15.0,0.9987680055428214,217.0,12.0,OK
+players_stats (8).xlsx,326,16.0,0.9988262785285938,222.0,,OK
+players_stats (9).xlsx,326,17.0,0.9986762646837104,219.0,,OK
+players_stats (r11).xlsx,320,14.0,0.8924324573532302,219.0,11.0,UNCERTAIN (low corr)
+players_stats.xlsx,34,,,,,"NOT A ROUND FILE (FPT all zero, only 2 team(s))"
