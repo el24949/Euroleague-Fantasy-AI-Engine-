@@ -1,0 +1,14 @@
+# data/my_team_state.csv -- simple editable fields tracked separately from
+# the roster itself (data/my_team.csv). Loaded by optimizer/my_team.py's
+# load_my_team_state(). Lines starting with '#' are ignored.
+#
+# remaining_budget : credits left unspent (out of the 100-credit total
+#                    budget -- optimizer/pick_team_ilp.py's BUDGET), i.e.
+#                    100 minus what your current roster + coach cost.
+# trades_used      : how many trades you've made this season so far.
+#
+# Starting values below assume a fresh, untraded team -- edit after every
+# trade.
+field,value
+remaining_budget,100.0
+trades_used,0

@@ -1,0 +1,32 @@
+# data/my_team.csv -- YOUR CURRENT EuroLeague Fantasy roster (hand-edited).
+# Loaded by optimizer/my_team.py's load_my_team(). Lines starting with '#'
+# are ignored -- this file is meant to be edited by hand, not generated.
+#
+# Columns:
+#   player_name : the 10 players -- "LASTNAME, FIRSTNAME", case-insensitive,
+#                 same convention as data/unavailable.csv (e.g. "LARKIN, SHANE").
+#                 the 1 coach row -- "First Last" (e.g. "Sergio Scariolo").
+#   role        : starter | 6th_man | bench | coach
+#                 exactly 5 starter, 1 6th_man, 4 bench, 1 coach (11 rows total).
+#   captain     : Y on exactly one row (must be a starter), blank otherwise.
+#
+# IMPORTANT -- QUOTE player_name: "LASTNAME, FIRSTNAME" contains a comma,
+# the same character that separates CSV columns. Wrap it in double quotes
+# or the row will misparse: "LARKIN, SHANE",starter,   -- not
+# LARKIN, SHANE,starter,   (coach names have no comma, so no quotes needed).
+#
+# Fill in player_name below with your real roster, then run
+# `python -m optimizer.my_team` to validate it and see it reported back
+# with resolved positions and prices.
+player_name,role,captain
+,starter,
+,starter,
+,starter,
+,starter,
+,starter,
+,6th_man,
+,bench,
+,bench,
+,bench,
+,bench,
+,coach,
