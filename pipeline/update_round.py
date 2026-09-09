@@ -316,8 +316,42 @@ def run_prediction_step(target_gamecodes):
     return round_features
 
 
-def run_team_generation_step(round_features, target_gamecodes, prices_df, season=SEASON):
-    """Step 6: the live optimizer -- attach positions/turns/this round's
+SHORTLIST_COLUMNS = ["rank", "coach", "Team", "recent_avg_margin", "opponent", "coach_price"]
+FULL_TEAM_COLUMNS = [
+    "Player",
+    "role",
+    "position",
+    "turn",
+    "price",
+    "predicted_score",
+    "consistency_5",
+    "objective_score",
+]
+
+
+def _plain_value(value):
+    """A numpy scalar (int64/float64/bool_ -- what pandas hands back from a
+    column read or a to_dict('records') row) converted to its native Python
+    equivalent via .item(); anything else (str, None, already-native
+    int/float) is returned unchanged. Used so get_recommended_team()'s
+    return value is plain, picklable Python types only -- no numpy/pandas
+    objects -- per this extraction slice's contract."""
+    return value.item() if hasattr(value, "item") else value
+
+
+def _plain_records(df, columns):
+    """DataFrame[columns] -> list[dict], every value passed through
+    _plain_value. The list-of-dicts shape (not the DataFrame itself) is
+    what get_recommended_team() returns; run_team_generation_step()
+    rebuilds a DataFrame from it to print the identical table."""
+    return [
+        {col: _plain_value(v) for col, v in row.items()}
+        for row in df[columns].to_dict("records")
+    ]
+
+
+def get_recommended_team(round_features, target_gamecodes, prices_df, season=SEASON):
+    """Step 6's computation, extracted: attach positions/turns/this round's
     real prices, drop unavailable/unpriced candidates, build the coach
     shortlist, and solve the risk-aware turn-coverage-bonused lineup MILP.
     Reuses attach_positions/get_round_season (optimizer/pick_team.py),
@@ -330,9 +364,14 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
     that file's own __main__ uses. See the module docstring's ONE
     DELIBERATE DIFFERENCE note for the one thing that IS different: prices
     come from prices_df (this round's real quotations), not load_prices()'s
-    generic snapshot."""
-    print(f"\n=== Step 6/6: live optimizer (Season {season}) ===")
+    generic snapshot.
 
+    RETURNS, NOT PRINTS: a plain dict (str/int/float/list/dict values only --
+    no DataFrame, no PuLP problem/solver object, no DB handle), mirroring
+    exactly what run_team_generation_step() below used to print inline
+    before this extraction. Every field here was already part of that
+    printed report; nothing new was added. run_team_generation_step() is
+    now a thin wrapper: call this, then print from what it returns."""
     df_round = attach_positions(round_features)
 
     unavailable = load_unavailable()
@@ -340,14 +379,12 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
     excluded_mask = df_round["Player_ID"].str.strip().isin(excluded_ids)
     excluded_names = df_round.loc[excluded_mask, "Player"].unique().tolist()
     df_round = df_round[~excluded_mask].copy()
-    print(f"Excluded {len(excluded_names)} unavailable player(s) (data/unavailable.csv): {excluded_names}")
 
     price_lookup = dict(zip(prices_df["Player_ID"], prices_df["Quotation"]))
     df_round["price"] = df_round["Player_ID"].str.strip().map(price_lookup)
     no_price_mask = df_round["price"].isna()
     no_price_names = df_round.loc[no_price_mask, "Player"].unique().tolist()
     df_round = df_round[~no_price_mask].copy()
-    print(f"Excluded {len(no_price_names)} player(s) with no matching price this round: {no_price_names}")
 
     season_resolved = get_round_season(df_round)
     captain_multiplier = get_rules(season_resolved)["captain_multiplier"]
@@ -355,23 +392,14 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
     turn_lookup = build_turn_lookup(season_resolved)
     df_round = attach_turns(df_round, turn_lookup)
     flagged_turns = df_round[df_round["turn"].isin(["RESCHEDULED", "NO_TURN_FOUND"])]
-    if len(flagged_turns):
-        print(
-            f"{flagged_turns['Player'].nunique()} candidate(s) have no clean T1/T2 turn "
-            f"(excluded from the turn-coverage bonus, not from the roster pool)"
-        )
+    flagged_turns_count = flagged_turns["Player"].nunique()
 
     # --- coach shortlist (same ranking coach_ranking.py prints standalone) ---
     ranked_coaches = rank_coaches(target_gamecodes)
     shortlist = ranked_coaches.head(SHORTLIST_SIZE).reset_index(drop=True)
     shortlist_display = shortlist.copy()
     shortlist_display.insert(0, "rank", shortlist_display.index + 1)
-    print(f"\nCoach shortlist for this round (top {SHORTLIST_SIZE} by recent-margin):")
-    print(
-        shortlist_display[
-            ["rank", "coach", "Team", "recent_avg_margin", "opponent", "coach_price"]
-        ].to_string(index=False)
-    )
+    coach_shortlist = _plain_records(shortlist_display, SHORTLIST_COLUMNS)
 
     if not isinstance(CHOSEN_COACH_RANK, int) or not (1 <= CHOSEN_COACH_RANK <= SHORTLIST_SIZE):
         raise ValueError(
@@ -387,11 +415,6 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
             f"Chosen coach {coach_name} ({coach_team}) has no price in the price sheet."
         )
     player_budget = BUDGET - coach_price
-    print(
-        f"\nChosen coach (shortlist rank {CHOSEN_COACH_RANK}/{SHORTLIST_SIZE}): "
-        f"{coach_name} ({coach_team}) -- price {coach_price:.1f}, "
-        f"player budget {BUDGET} - {coach_price:.1f} = {player_budget:.1f}"
-    )
 
     missing_consistency = df_round["consistency_5"].isna()
     if missing_consistency.any():
@@ -411,10 +434,6 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
     )
     starters_idx, sixth_idx, bench_idx = result["starters_idx"], result["sixth_idx"], result["bench_idx"]
     captain_idx, roster_idx = result["captain_idx"], result["roster_idx"]
-
-    print(f"\nSolver status: {result['status']}")
-    print(f"Formation: {result['formation']}")
-    print(f"Season: {season_resolved}, captain_multiplier: {captain_multiplier}, RISK_LAMBDA: {RISK_LAMBDA}")
 
     role_by_idx = {}
     for idx in starters_idx:
@@ -446,21 +465,9 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
         ]
     )
 
-    columns = [
-        "Player",
-        "role",
-        "position",
-        "turn",
-        "price",
-        "predicted_score",
-        "consistency_5",
-        "objective_score",
-    ]
-    full_team = pd.concat([coach_row, players_table[columns]], ignore_index=True)
+    full_team = pd.concat([coach_row, players_table[FULL_TEAM_COLUMNS]], ignore_index=True)
     full_team = full_team.sort_values(by="role", key=lambda col: col.map(role_order))
-
-    print(f"\nFull 11-slot recommended team (Round {min(target_gamecodes)}-{max(target_gamecodes)}):")
-    print(full_team[columns].to_string(index=False))
+    full_team_rows = _plain_records(full_team, FULL_TEAM_COLUMNS)
 
     coverage_rows = []
     for position in POSITION_REQUIREMENTS:
@@ -470,23 +477,97 @@ def run_team_generation_step(round_features, target_gamecodes, prices_df, season
             {
                 "position": position,
                 "rostered": len(group),
-                "T1_count": (group["turn"] == "T1").sum(),
-                "T2_count": (group["turn"] == "T2").sum(),
-                "both_turns_covered": result["turn_coverage"].get(position),
+                "T1_count": _plain_value((group["turn"] == "T1").sum()),
+                "T2_count": _plain_value((group["turn"] == "T2").sum()),
+                "both_turns_covered": _plain_value(result["turn_coverage"].get(position)),
             }
         )
-    print(f"\nTurn coverage by position (TURN_COVERAGE_WEIGHT={TURN_COVERAGE_WEIGHT}):")
-    print(pd.DataFrame(coverage_rows).to_string(index=False))
 
     total_quotation = df_round.loc[roster_idx, "price"].sum()
-    print(f"\nPlayer quotation used: {total_quotation:.1f} / {player_budget:.1f}")
-    print(f"Total squad cost (coach + players): {coach_price + total_quotation:.1f} / {BUDGET}")
 
     return {
-        "full_team": full_team,
-        "shortlist": shortlist,
-        "result": result,
+        "season": season,
+        "season_resolved": _plain_value(season_resolved),
+        "target_gamecode_min": min(target_gamecodes),
+        "target_gamecode_max": max(target_gamecodes),
+        "captain_multiplier": _plain_value(captain_multiplier),
+        "risk_lambda": RISK_LAMBDA,
+        "turn_coverage_weight": TURN_COVERAGE_WEIGHT,
+        "budget": BUDGET,
+        "excluded_unavailable": {"count": len(excluded_names), "names": excluded_names},
+        "excluded_no_price": {"count": len(no_price_names), "names": no_price_names},
+        "flagged_turns_count": _plain_value(flagged_turns_count),
+        "shortlist_size": SHORTLIST_SIZE,
+        "coach_shortlist": coach_shortlist,
+        "chosen_coach_rank": CHOSEN_COACH_RANK,
+        "chosen_coach": {
+            "name": coach_name,
+            "team": coach_team,
+            "price": _plain_value(coach_price),
+        },
+        "player_budget": _plain_value(player_budget),
+        "solver_status": result["status"],
+        "formation": result["formation"],
+        "full_team": full_team_rows,
+        "turn_coverage_by_position": coverage_rows,
+        "total_quotation": _plain_value(total_quotation),
+        "total_squad_cost": _plain_value(coach_price + total_quotation),
     }
+
+
+def run_team_generation_step(round_features, target_gamecodes, prices_df, season=SEASON):
+    """Step 6 (thin wrapper): computes via get_recommended_team() above,
+    then prints the exact same report Step 6 has always printed -- this
+    function now does nothing BUT call that function and print from what
+    it returns, so the output is unchanged byte-for-byte."""
+    print(f"\n=== Step 6/6: live optimizer (Season {season}) ===")
+
+    team = get_recommended_team(round_features, target_gamecodes, prices_df, season=season)
+
+    print(
+        f"Excluded {team['excluded_unavailable']['count']} unavailable player(s) "
+        f"(data/unavailable.csv): {team['excluded_unavailable']['names']}"
+    )
+    print(
+        f"Excluded {team['excluded_no_price']['count']} player(s) with no matching "
+        f"price this round: {team['excluded_no_price']['names']}"
+    )
+    if team["flagged_turns_count"]:
+        print(
+            f"{team['flagged_turns_count']} candidate(s) have no clean T1/T2 turn "
+            f"(excluded from the turn-coverage bonus, not from the roster pool)"
+        )
+
+    print(f"\nCoach shortlist for this round (top {team['shortlist_size']} by recent-margin):")
+    print(pd.DataFrame(team["coach_shortlist"], columns=SHORTLIST_COLUMNS).to_string(index=False))
+
+    chosen_coach = team["chosen_coach"]
+    print(
+        f"\nChosen coach (shortlist rank {team['chosen_coach_rank']}/{team['shortlist_size']}): "
+        f"{chosen_coach['name']} ({chosen_coach['team']}) -- price {chosen_coach['price']:.1f}, "
+        f"player budget {team['budget']} - {chosen_coach['price']:.1f} = {team['player_budget']:.1f}"
+    )
+
+    print(f"\nSolver status: {team['solver_status']}")
+    print(f"Formation: {team['formation']}")
+    print(
+        f"Season: {team['season_resolved']}, captain_multiplier: {team['captain_multiplier']}, "
+        f"RISK_LAMBDA: {team['risk_lambda']}"
+    )
+
+    print(
+        f"\nFull 11-slot recommended team (Round {team['target_gamecode_min']}-"
+        f"{team['target_gamecode_max']}):"
+    )
+    print(pd.DataFrame(team["full_team"], columns=FULL_TEAM_COLUMNS).to_string(index=False))
+
+    print(f"\nTurn coverage by position (TURN_COVERAGE_WEIGHT={team['turn_coverage_weight']}):")
+    print(pd.DataFrame(team["turn_coverage_by_position"]).to_string(index=False))
+
+    print(f"\nPlayer quotation used: {team['total_quotation']:.1f} / {team['player_budget']:.1f}")
+    print(f"Total squad cost (coach + players): {team['total_squad_cost']:.1f} / {team['budget']}")
+
+    return team
 
 
 if __name__ == "__main__":
