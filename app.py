@@ -1,8 +1,10 @@
-"""Slice 2: read-only Streamlit display of the recommended team.
+"""Slice 3: Streamlit display of the recommended team, with a round selector.
 
-DISPLAY ONLY -- no input widgets, no persistence, no team entry, no DB write.
-Renders exactly the plain dict get_recommended_team() (pipeline/update_round.py)
-already returns; nothing here recomputes a feature, a price, or the lineup.
+ONE input widget only (round selectbox, values restricted to a known-safe range
+[30-36]) -- no team entry, no budget, no trades, no persistence, no DB write.
+Everything downstream of load_recommendation()'s returned dict is unchanged from
+slice 2: still exactly the plain dict get_recommended_team() (pipeline/update_round.py)
+returns; nothing here recomputes a feature, a price, or the lineup.
 
 WHY load_recommendation() IS THE ONLY CACHED FUNCTION, AND WHY IT'S THE ONLY
 THING CALLED AT MODULE LEVEL: Streamlit reruns this entire script top-to-bottom
@@ -16,9 +18,11 @@ it separately would add nothing. No other work happens at import time -- the
 functions below the imports are all `def`s; the only top-level *calls* are
 load_recommendation() and the st.* render calls that follow it.
 
-SAME ROUND pipeline/update_round.py's __main__ targets: Season 2025, TARGET_ROUND
-(see that module's own "TESTING ON A PAST ROUND" docstring section for why --
-Season 2025 is fully played, so this stands in for "the upcoming round").
+SAME PATTERN pipeline/update_round.py's __main__ uses: Season 2025, a past round
+standing in for "the upcoming round" (see that module's own "TESTING ON A PAST
+ROUND" docstring section for why -- Season 2025 is fully played). round_no here
+is user-selected instead of the module's fixed TARGET_ROUND, restricted to
+ROUND_OPTIONS so a stray value can't hit an unpriced/uncollected round.
 
 NO DB WRITE: load_prices_for_round() is called directly here, never store_prices()
 (the only function in that module that writes to the prices table) -- see
@@ -30,7 +34,6 @@ import streamlit as st
 from data_collection.load_prices_history import load_prices_for_round
 from pipeline.update_round import (
     SEASON,
-    TARGET_ROUND,
     get_recommended_team,
     get_round_gamecodes,
     run_prediction_step,
@@ -38,14 +41,19 @@ from pipeline.update_round import (
 
 st.set_page_config(page_title="EuroLeague Fantasy -- Recommended Team", layout="wide")
 
+ROUND_OPTIONS = [30, 31, 32, 33, 34, 35, 36]
+
 
 @st.cache_data
-def load_recommendation():
+def load_recommendation(round_no):
     """Step 6's inputs, built exactly as update_round.py's __main__ does, then
-    get_recommended_team()'s plain dict. Cached so this only runs once per
-    Streamlit session, not on every rerun."""
-    target_gamecodes = get_round_gamecodes(SEASON, TARGET_ROUND)
-    prices_df, _coverage = load_prices_for_round(TARGET_ROUND, season=SEASON)
+    get_recommended_team()'s plain dict. Cached per round_no argument -- Streamlit
+    reruns this script top-to-bottom on every widget interaction, so round_no MUST
+    arrive as a function argument (not read from st.session_state inside this
+    function) for @st.cache_data to key its cache on it and skip recompute when
+    the user switches back to an already-seen round."""
+    target_gamecodes = get_round_gamecodes(SEASON, round_no)
+    prices_df, _coverage = load_prices_for_round(round_no, season=SEASON)
     round_features = run_prediction_step(target_gamecodes)
     return get_recommended_team(round_features, target_gamecodes, prices_df, season=SEASON)
 
@@ -57,7 +65,10 @@ st.caption(
     "correctly, not a recommendation to act on."
 )
 
-team = load_recommendation()
+st.caption("Season: 2025")
+round_no = st.selectbox("Round", ROUND_OPTIONS, index=ROUND_OPTIONS.index(32))
+
+team = load_recommendation(round_no)
 
 st.title("Recommended Team")
 
