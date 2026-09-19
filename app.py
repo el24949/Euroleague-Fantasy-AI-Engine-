@@ -1,10 +1,17 @@
-"""Slice 3: Streamlit display of the recommended team, with a round selector.
+"""Slice 4: Streamlit display of the recommended team, plus a display-only squad
+picker (round selector from slice 3 unchanged).
 
-ONE input widget only (round selectbox, values restricted to a known-safe range
-[30-36]) -- no team entry, no budget, no trades, no persistence, no DB write.
-Everything downstream of load_recommendation()'s returned dict is unchanged from
-slice 2: still exactly the plain dict get_recommended_team() (pipeline/update_round.py)
-returns; nothing here recomputes a feature, a price, or the lineup.
+The squad picker section is a multiselect that echoes back what's picked --
+count, total price, position breakdown. NO validation (no roster-shape check,
+no budget cap, no legality check) and NO persistence (no my_team.csv write, no
+DB write, no optimizer call). It reads the live price table via
+optimizer.my_team.load_prices() and does nothing else with it.
+
+ROUND SELECTOR (slice 3): ONE input widget, values restricted to a known-safe
+range [30-36] -- no team entry, no budget, no trades. Everything downstream of
+load_recommendation()'s returned dict is unchanged from slice 2: still exactly
+the plain dict get_recommended_team() (pipeline/update_round.py) returns;
+nothing here recomputes a feature, a price, or the lineup.
 
 WHY load_recommendation() IS THE ONLY CACHED FUNCTION, AND WHY IT'S THE ONLY
 THING CALLED AT MODULE LEVEL: Streamlit reruns this entire script top-to-bottom
@@ -32,6 +39,7 @@ data_collection/load_prices_history.py.
 import streamlit as st
 
 from data_collection.load_prices_history import load_prices_for_round
+from optimizer.my_team import load_prices
 from pipeline.update_round import (
     SEASON,
     get_recommended_team,
@@ -56,6 +64,17 @@ def load_recommendation(round_no):
     prices_df, _coverage = load_prices_for_round(round_no, season=SEASON)
     round_features = run_prediction_step(target_gamecodes)
     return get_recommended_team(round_features, target_gamecodes, prices_df, season=SEASON)
+
+
+@st.cache_data
+def load_player_table():
+    """optimizer.my_team.load_prices() behind a cached function, same pattern as
+    load_recommendation -- it parses an Excel file, so it shouldn't run on every
+    rerun. load_prices() returns (df, meta_dict) of excluded rows (head coaches,
+    missing position, placeholder ID); this slice only needs the usable df, so
+    meta_dict is discarded here and never returned."""
+    df, _meta = load_prices()
+    return df
 
 
 st.caption(
@@ -125,3 +144,34 @@ excluded_cols[0].markdown(f"**Unavailable (manual override): {excluded_unavailab
 excluded_cols[0].write(excluded_unavailable["names"] or "None")
 excluded_cols[1].markdown(f"**No matching price this round: {excluded_no_price['count']}**")
 excluded_cols[1].write(excluded_no_price["names"] or "None")
+
+st.divider()
+st.header("My Squad (display-only preview)")
+st.caption(
+    "Pick players below -- this just echoes back what you select. No roster-shape "
+    "check, no budget cap, no legality check, and nothing is saved."
+)
+
+players_df = load_player_table()
+player_names = {
+    row.Player_ID: f"{row.Surname.upper()}, {row.Name}"
+    for row in players_df.itertuples()
+}
+
+selected_ids = st.multiselect(
+    "Pick your squad",
+    options=players_df["Player_ID"].tolist(),
+    format_func=lambda player_id: player_names[player_id],
+)
+
+selected_df = players_df[players_df["Player_ID"].isin(selected_ids)]
+
+squad_cols = st.columns(2)
+squad_cols[0].metric("Players selected", len(selected_df))
+squad_cols[1].metric("Total price", f"{selected_df['Quotation'].sum():.1f}")
+
+st.subheader("Position breakdown")
+st.dataframe(
+    selected_df["Position"].value_counts().rename_axis("Position").reset_index(name="Count"),
+    width="stretch",
+)
