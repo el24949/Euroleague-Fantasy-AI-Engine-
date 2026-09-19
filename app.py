@@ -39,7 +39,7 @@ data_collection/load_prices_history.py.
 import streamlit as st
 
 from data_collection.load_prices_history import load_prices_for_round
-from optimizer.my_team import load_prices
+from optimizer.my_team import POSITION_NAME_TO_CODE, load_prices
 from pipeline.update_round import (
     SEASON,
     get_recommended_team,
@@ -148,8 +148,8 @@ excluded_cols[1].write(excluded_no_price["names"] or "None")
 st.divider()
 st.header("My Squad (display-only preview)")
 st.caption(
-    "Pick players below -- this just echoes back what you select. No roster-shape "
-    "check, no budget cap, no legality check, and nothing is saved."
+    "Pick players below -- this echoes back what you select and reports whether it's "
+    "a legal squad. It never blocks a pick and nothing is saved."
 )
 
 players_df = load_player_table()
@@ -175,3 +175,56 @@ st.dataframe(
     selected_df["Position"].value_counts().rename_axis("Position").reset_index(name="Count"),
     width="stretch",
 )
+
+st.subheader("Roster legality check")
+st.caption(
+    "Display/feedback only -- reports against the 4 hard constraints below, never "
+    "blocks or removes a pick. A partial squad (<10) is a normal in-progress state."
+)
+
+REQUIRED_POSITION_COUNTS = {"G": 4, "F": 4, "C": 2}
+POSITION_LABELS = {"G": "Guards", "F": "Forwards", "C": "Centers"}
+SQUAD_SIZE = 10
+MAX_PER_CLUB = 6
+BUDGET = 100
+
+failures = []
+
+squad_count = len(selected_df)
+if squad_count == SQUAD_SIZE:
+    st.write(f"Players: {squad_count}/{SQUAD_SIZE} OK")
+else:
+    st.write(f"Players: {squad_count}/{SQUAD_SIZE} - need {SQUAD_SIZE}")
+    failures.append(f"Players {squad_count}/{SQUAD_SIZE}")
+
+mapped_positions = selected_df["Position"].map(POSITION_NAME_TO_CODE)
+for code, required in REQUIRED_POSITION_COUNTS.items():
+    actual = int((mapped_positions == code).sum())
+    label = POSITION_LABELS[code]
+    if actual == required:
+        st.write(f"{label}: {actual}/{required} OK")
+    else:
+        note = "too many" if actual > required else "too few"
+        st.write(f"{label}: {actual}/{required} - {note}")
+        failures.append(f"{label} {actual}/{required}")
+
+club_counts = selected_df["Team"].value_counts()
+clubs_over_limit = club_counts[club_counts > MAX_PER_CLUB]
+if clubs_over_limit.empty:
+    st.write(f"Club limit: OK (max {MAX_PER_CLUB} per club)")
+else:
+    for club, count in clubs_over_limit.items():
+        st.write(f"{club}: {count}/{MAX_PER_CLUB} - too many")
+        failures.append(f"{club} {count}/{MAX_PER_CLUB}")
+
+total_cost = float(selected_df["Quotation"].sum())
+if total_cost <= BUDGET:
+    st.write(f"Cost: {total_cost:.1f}/{BUDGET} OK")
+else:
+    st.write(f"Cost: {total_cost:.1f}/{BUDGET} - over budget")
+    failures.append(f"Cost {total_cost:.1f}/{BUDGET}")
+
+if not failures:
+    st.success("Legal squad")
+else:
+    st.error("Not a legal squad -- " + "; ".join(failures))
