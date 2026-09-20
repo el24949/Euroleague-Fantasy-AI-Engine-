@@ -39,7 +39,10 @@ data_collection/load_prices_history.py.
 import streamlit as st
 
 from data_collection.load_prices_history import load_prices_for_round
+from features.turn_tags import build_turn_lookup
 from optimizer.my_team import POSITION_NAME_TO_CODE, load_prices
+from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
+from optimizer.turn_join import attach_turns
 from pipeline.update_round import (
     SEASON,
     get_recommended_team,
@@ -62,8 +65,77 @@ def load_recommendation(round_no):
     the user switches back to an already-seen round."""
     target_gamecodes = get_round_gamecodes(SEASON, round_no)
     prices_df, _coverage = load_prices_for_round(round_no, season=SEASON)
-    round_features = run_prediction_step(target_gamecodes)
+    round_features = load_round_features(round_no)
     return get_recommended_team(round_features, target_gamecodes, prices_df, season=SEASON)
+
+
+@st.cache_data
+def load_round_features(round_no):
+    """run_prediction_step() behind its own cache so the squad-roles section
+    (slice 6) and load_recommendation share ONE model fit per round."""
+    return run_prediction_step(get_round_gamecodes(SEASON, round_no))
+
+
+def assign_squad_roles(round_features, selected_df):
+    """Slice 6: run the existing solve_lineup() with the roster FIXED to the
+    selected squad. Returns (result_df, error_message); exactly one is None.
+
+    The candidate pool is restricted to the selected Player_IDs AND those rows
+    are forced onto the roster (fixed_roster_idx), so only roles + formation are
+    optimized. Formation/weights/risk objective come from pick_lineup_ilp
+    unchanged. Captain is NOT decided by the ILP (captain_multiplier=1.0 zeroes
+    its bonus and its captain pick is ignored): it is a post-step over T1
+    starters only. Prices are the live price table's, same as the legality check."""
+    selected_ids = set(selected_df["Player_ID"].str.strip())
+    pool = round_features[round_features["Player_ID"].str.strip().isin(selected_ids)].copy()
+    pool["Player_ID"] = pool["Player_ID"].str.strip()
+
+    missing = selected_df[~selected_df["Player_ID"].str.strip().isin(set(pool["Player_ID"]))]
+    if len(missing):
+        names = [f"{r.Surname.upper()}, {r.Name}" for r in missing.itertuples()]
+        return None, (
+            "No prediction available this round for: " + "; ".join(names)
+            + " (did not play, or not enough prior history)."
+        )
+    if pool["Player_ID"].duplicated().any():
+        return None, "Duplicate Player_ID rows in this round's features."
+
+    # Position + price both come from the price sheet (the source the slice-5
+    # legality check used) -- NOT attach_positions(): box-score positions can
+    # disagree with the price sheet for a player, and the squad's legal 4G/4F/2C
+    # shape is defined by the price sheet.
+    sheet = selected_df.assign(Player_ID=selected_df["Player_ID"].str.strip()).set_index("Player_ID")
+    pool["position"] = pool["Player_ID"].map(sheet["Position"].map(POSITION_NAME_TO_CODE))
+    pool["price"] = pool["Player_ID"].map(sheet["Quotation"])
+    pool = attach_turns(pool, build_turn_lookup(SEASON))
+    pool["objective_score"] = pool["predicted_score"] - RISK_LAMBDA * pool["consistency_5"]
+
+    pos_counts = pool["position"].value_counts().to_dict()
+    if any(pos_counts.get(p, 0) != n for p, n in REQUIRED_POSITION_COUNTS.items()):
+        return None, f"Squad positions don't form 4G/4F/2C: {pos_counts}"
+
+    result = solve_lineup(
+        pool,
+        "objective_score",
+        1.0,  # captain handled below as a post-step, not by the ILP
+        budget=BUDGET,
+        fixed_roster_idx=pool.index,
+    )
+    if result["status"] != "Optimal":
+        return None, f"Solver status: {result['status']}"
+
+    role_by_idx = {i: "Starter" for i in result["starters_idx"]}
+    role_by_idx.update({i: "6th Man" for i in result["sixth_idx"]})
+    role_by_idx.update({i: "Bench" for i in result["bench_idx"]})
+    pool["role"] = pool.index.map(role_by_idx)
+
+    t1_starters = pool[(pool["role"] == "Starter") & (pool["turn"] == "T1")]
+    if t1_starters.empty:
+        return None, "No T1 starter to captain -- none of the starters plays in turn 1."
+    captain_idx = t1_starters["predicted_score"].idxmax()
+    pool["captain"] = pool.index == captain_idx
+    pool.attrs["formation"] = result["formation"]
+    return pool, None
 
 
 @st.cache_data
@@ -228,3 +300,30 @@ if not failures:
     st.success("Legal squad")
 else:
     st.error("Not a legal squad -- " + "; ".join(failures))
+
+st.divider()
+st.header("Squad roles (display-only)")
+st.caption(
+    f"Roster fixed to your 10 players; the existing lineup optimizer assigns "
+    f"Starter / 6th Man / Bench + formation (risk objective, lambda={RISK_LAMBDA}). "
+    "Captain = highest predicted_score among T1 starters (post-step). Round "
+    f"{round_no}, Season {SEASON}. Nothing is saved."
+)
+
+if failures:
+    st.info("Complete a legal squad above to assign roles.")
+else:
+    squad_result, squad_error = assign_squad_roles(load_round_features(round_no), selected_df)
+    if squad_error:
+        st.warning(squad_error)
+    else:
+        st.metric("Formation", squad_result.attrs["formation"])
+        role_order = {"Starter": 0, "6th Man": 1, "Bench": 2}
+        squad_table = squad_result.assign(
+            Player=squad_result["Player"] + squad_result["captain"].map({True: " (C)", False: ""}),
+            _order=squad_result["role"].map(role_order),
+        ).sort_values(["_order", "predicted_score"], ascending=[True, False])
+        st.dataframe(
+            squad_table[["Player", "role", "position", "turn", "predicted_score"]],
+            width="stretch",
+        )

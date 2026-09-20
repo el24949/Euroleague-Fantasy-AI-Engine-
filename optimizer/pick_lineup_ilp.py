@@ -175,8 +175,16 @@ def solve_lineup(
     scoring_weight=SCORING_WEIGHT,
     bench_weight=BENCH_WEIGHT,
     turn_coverage_weight=0.0,
+    fixed_roster_idx=None,
 ):
     """Solve the roster+lineup MILP over df_round, maximizing score_col.
+
+    fixed_roster_idx (default None = unchanged behavior): an iterable of
+    df_round index labels forced onto the roster (player_vars == 1). Combined
+    with the 4G/4F/2C count constraints (10 total) this pins the roster to
+    exactly those players, so only roles (starter/6th man/bench) and
+    formation are optimized. Used by the frontend to assign roles to an
+    already-owned squad.
 
     df_round must already have 'position', 'price', 'Team', and score_col
     columns, and a unique index (used as the player identifier throughout).
@@ -224,6 +232,16 @@ def solve_lineup(
             )
             <= max_per_club
         )
+
+    # --- optional fixed roster: force the given players onto the roster. The
+    # --- position counts above total 10, so this leaves no room for anyone else ---
+    if fixed_roster_idx is not None:
+        fixed_roster_idx = list(fixed_roster_idx)
+        unknown = [idx for idx in fixed_roster_idx if idx not in player_vars]
+        if unknown:
+            raise ValueError(f"solve_lineup: fixed_roster_idx not in df_round: {unknown}")
+        for idx in fixed_roster_idx:
+            prob += player_vars[idx] == 1
 
     # --- scoring-group membership: only rostered players can start or be 6th man ---
     for idx in df_round.index:
