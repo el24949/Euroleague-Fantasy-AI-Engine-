@@ -40,6 +40,7 @@ import streamlit as st
 
 from data_collection.load_prices_history import load_prices_for_round
 from features.turn_tags import build_turn_lookup
+from my_team_writer import read_header_comments, render_csv, save_my_team
 from optimizer.my_team import POSITION_NAME_TO_CODE, load_prices
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
 from optimizer.turn_join import attach_turns
@@ -312,10 +313,12 @@ st.caption(
 
 if failures:
     st.info("Complete a legal squad above to assign roles.")
+    st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_illegal")
 else:
     squad_result, squad_error = assign_squad_roles(load_round_features(round_no), selected_df)
     if squad_error:
         st.warning(squad_error)
+        st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_noroles")
     else:
         st.metric("Formation", squad_result.attrs["formation"])
         role_order = {"Starter": 0, "6th Man": 1, "Bench": 2}
@@ -327,3 +330,56 @@ else:
             squad_table[["Player", "role", "position", "turn", "predicted_score"]],
             width="stretch",
         )
+
+        # ---- Slice 7: save to data/my_team.csv (deliberate click only) ----
+        st.divider()
+        st.header("Save squad to data/my_team.csv")
+        st.caption(
+            "OVERWRITES the file the pipeline reads. First save backs the old file up "
+            "to my_team.csv.bak; the write is atomic. Nothing is written until you click Save."
+        )
+        shortlist = team["coach_shortlist"]
+        coach_choice = st.selectbox(
+            "Coach (from the round's top-5 shortlist above)",
+            options=range(len(shortlist)),
+            index=None,
+            placeholder="Pick a coach to enable saving",
+            format_func=lambda i: (
+                f"{shortlist[i]['coach']} ({shortlist[i]['Team']}) -- "
+                f"price {shortlist[i]['coach_price']:.1f}"
+            ),
+        )
+
+        if coach_choice is None:
+            st.info("Choose a coach to see the rows and enable saving.")
+            st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_nocoach")
+        else:
+            coach_row = shortlist[coach_choice]
+            if total_cost + coach_row["coach_price"] > BUDGET:
+                st.warning(
+                    f"Players {total_cost:.1f} + coach {coach_row['coach_price']:.1f} "
+                    f"exceeds the {BUDGET} budget (saving is still allowed)."
+                )
+            sheet_names = {
+                r.Player_ID.strip(): f"{r.Surname.upper()}, {r.Name}"
+                for r in selected_df.itertuples()
+            }
+            role_csv = {"Starter": "starter", "6th Man": "6th_man", "Bench": "bench"}
+            save_rows = [
+                {
+                    "player_name": sheet_names[r.Player_ID],
+                    "role": role_csv[r.role],
+                    "captain": "Y" if r.captain else "",
+                }
+                for r in squad_result.itertuples()
+            ] + [{"player_name": coach_row["coach"], "role": "coach", "captain": ""}]
+
+            st.subheader("Preview -- exact file content that will be written")
+            st.code(render_csv(save_rows, read_header_comments()), language="text")
+
+            if st.button("Save to data/my_team.csv", type="primary"):
+                try:
+                    written = save_my_team(save_rows)
+                    st.success(f"Saved 11 rows to {written}")
+                except Exception as exc:  # show, never swallow
+                    st.error(f"Save failed, my_team.csv unchanged: {exc}")
