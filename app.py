@@ -43,6 +43,7 @@ from features.turn_tags import build_turn_lookup
 from my_team_writer import read_header_comments, render_csv, save_my_team
 from optimizer.my_team import POSITION_NAME_TO_CODE, load_prices
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
+from optimizer.pick_team_ilp import BUDGET
 from optimizer.turn_join import attach_turns
 from pipeline.update_round import (
     SEASON,
@@ -275,7 +276,6 @@ REQUIRED_POSITION_COUNTS = {"G": 4, "F": 4, "C": 2}
 POSITION_LABELS = {"G": "Guards", "F": "Forwards", "C": "Centers"}
 SQUAD_SIZE = 10
 MAX_PER_CLUB = 6
-BUDGET = 100
 
 failures = []
 
