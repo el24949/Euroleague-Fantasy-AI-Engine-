@@ -239,6 +239,22 @@ selected_ids = st.multiselect(
 
 selected_df = players_df[players_df["Player_ID"].isin(selected_ids)]
 
+# Coach picker lives here (not in the save section) because the coach's price is
+# part of the 100 budget, so it must be known before the legality check runs.
+shortlist = team["coach_shortlist"]
+coach_choice = st.selectbox(
+    "Coach (from the round's top-5 shortlist above)",
+    options=range(len(shortlist)),
+    index=None,
+    placeholder="Pick a coach (its price counts toward the 100 budget)",
+    format_func=lambda i: (
+        f"{shortlist[i]['coach']} ({shortlist[i]['Team']}) -- "
+        f"price {shortlist[i]['coach_price']:.1f}"
+    ),
+)
+coach_row = shortlist[coach_choice] if coach_choice is not None else None
+
+
 squad_cols = st.columns(2)
 squad_cols[0].metric("Players selected", len(selected_df))
 squad_cols[1].metric("Total price", f"{selected_df['Quotation'].sum():.1f}")
@@ -290,12 +306,15 @@ else:
         st.write(f"{club}: {count}/{MAX_PER_CLUB} - too many")
         failures.append(f"{club} {count}/{MAX_PER_CLUB}")
 
-total_cost = float(selected_df["Quotation"].sum())
+players_cost = float(selected_df["Quotation"].sum())
+coach_cost = float(coach_row["coach_price"]) if coach_row is not None else 0.0
+total_cost = players_cost + coach_cost
+breakdown = f"Cost: {players_cost:.1f} players + {coach_cost:.1f} coach = {total_cost:.1f}/{BUDGET}"
 if total_cost <= BUDGET:
-    st.write(f"Cost: {total_cost:.1f}/{BUDGET} OK")
+    st.write(f"{breakdown} OK")
 else:
-    st.write(f"Cost: {total_cost:.1f}/{BUDGET} - over budget")
-    failures.append(f"Cost {total_cost:.1f}/{BUDGET}")
+    st.write(f"{breakdown} - over budget")
+    failures.append(f"Cost {players_cost:.1f} players + {coach_cost:.1f} coach = {total_cost:.1f}/{BUDGET}")
 
 if not failures:
     st.success("Legal squad")
@@ -338,28 +357,10 @@ else:
             "OVERWRITES the file the pipeline reads. First save backs the old file up "
             "to my_team.csv.bak; the write is atomic. Nothing is written until you click Save."
         )
-        shortlist = team["coach_shortlist"]
-        coach_choice = st.selectbox(
-            "Coach (from the round's top-5 shortlist above)",
-            options=range(len(shortlist)),
-            index=None,
-            placeholder="Pick a coach to enable saving",
-            format_func=lambda i: (
-                f"{shortlist[i]['coach']} ({shortlist[i]['Team']}) -- "
-                f"price {shortlist[i]['coach_price']:.1f}"
-            ),
-        )
-
         if coach_choice is None:
             st.info("Choose a coach to see the rows and enable saving.")
             st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_nocoach")
         else:
-            coach_row = shortlist[coach_choice]
-            if total_cost + coach_row["coach_price"] > BUDGET:
-                st.warning(
-                    f"Players {total_cost:.1f} + coach {coach_row['coach_price']:.1f} "
-                    f"exceeds the {BUDGET} budget (saving is still allowed)."
-                )
             sheet_names = {
                 r.Player_ID.strip(): f"{r.Surname.upper()}, {r.Name}"
                 for r in selected_df.itertuples()
