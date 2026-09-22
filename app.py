@@ -41,7 +41,12 @@ import streamlit as st
 from data_collection.load_prices_history import load_prices_for_round
 from features.turn_tags import build_turn_lookup
 from my_team_writer import read_header_comments, render_csv, save_my_team
-from optimizer.my_team import POSITION_NAME_TO_CODE, load_prices
+from optimizer.my_team import (
+    POSITION_NAME_TO_CODE,
+    PRICE_FILE,
+    load_coach_pool,
+    load_prices,
+)
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
 from optimizer.turn_join import attach_turns
@@ -138,6 +143,15 @@ def assign_squad_roles(round_features, selected_df):
     pool["captain"] = pool.index == captain_idx
     pool.attrs["formation"] = result["formation"]
     return pool, None
+
+
+@st.cache_data
+def load_coach_table():
+    """optimizer.my_team.load_coach_pool(PRICE_FILE) behind a cached function: the
+    head coaches (name + price) from the SAME round_01 price file load_my_team()
+    reads them from, so the app's coach price and the loader's are one value.
+    Sorted by price (desc) for a stable picker order."""
+    return load_coach_pool(PRICE_FILE).sort_values("coach_price", ascending=False).to_dict("records")
 
 
 @st.cache_data
@@ -242,18 +256,20 @@ selected_df = players_df[players_df["Player_ID"].isin(selected_ids)]
 
 # Coach picker lives here (not in the save section) because the coach's price is
 # part of the 100 budget, so it must be known before the legality check runs.
-shortlist = team["coach_shortlist"]
+# Coaches + prices come from PRICE_FILE (round_01), the same file load_my_team()
+# uses -- NOT the 2025 round shortlist above, whose prices are from an older sheet.
+coach_pool = load_coach_table()
 coach_choice = st.selectbox(
-    "Coach (from the round's top-5 shortlist above)",
-    options=range(len(shortlist)),
+    f"Coach (from {PRICE_FILE})",
+    options=range(len(coach_pool)),
     index=None,
     placeholder="Pick a coach (its price counts toward the 100 budget)",
     format_func=lambda i: (
-        f"{shortlist[i]['coach']} ({shortlist[i]['Team']}) -- "
-        f"price {shortlist[i]['coach_price']:.1f}"
+        f"{coach_pool[i]['coach']} ({coach_pool[i]['team_code']}) -- "
+        f"price {coach_pool[i]['coach_price']:.1f}"
     ),
 )
-coach_row = shortlist[coach_choice] if coach_choice is not None else None
+coach_row = coach_pool[coach_choice] if coach_choice is not None else None
 
 
 squad_cols = st.columns(2)

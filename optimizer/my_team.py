@@ -24,11 +24,18 @@ round-1 file) has real names/positions/prices/IDs right now, so player
 NAME, POSITION, PRICE, and PLAYER_ID all come from this ONE file instead --
 reused via data_collection.load_prices.load_prices() (its 'P'+zfill(6)
 Player_ID construction and its head-coach/missing-position/placeholder-ID
-splitting are used as-is, not reimplemented). Coach resolution is
-UNCHANGED -- still optimizer/coach_ranking.load_coach_info(), which reads
-the older generic data/prices/players_stats.xlsx snapshot. This wasn't
-asked for and stays out of scope here; it remains the same existing
-limitation optimizer/pick_lineup_ilp.py's own docstring already flags.
+splitting are used as-is, not reimplemented). COACH data comes from the
+SAME price_path file as the players, via load_coach_pool() below
+(load_prices(prices_path=price_path)'s excluded['head_coaches']), so a
+coach's price can never come from a different snapshot than the players'.
+It deliberately does NOT use optimizer/coach_ranking.load_coach_info(),
+which reads the older generic data/prices/players_stats.xlsx and remaps
+team codes through PRICE_SHEET_TEAM_CODE_MAP (2025-derived, missing the
+2026 clubs BJK/FBT/MIL, so it would raise on this file). load_coach_pool's
+team_code is therefore the price sheet's own club code; it is only
+displayed / used to disambiguate a coach name, never for coach scoring.
+(load_coach_info is still what coach_ranking.rank_coaches and
+optimizer/pick_lineup_ilp.py use -- untouched by this loader.)
 
 PLACEHOLDER-ID RECOVERY: load_prices() already splits out rows whose ID is
 the literal placeholder '-' (excluded['placeholder_id']) -- confirmed
@@ -64,7 +71,7 @@ import sqlite3
 import pandas as pd
 
 from data_collection.load_prices import load_prices
-from optimizer.coach_ranking import PRICE_SHEET_TEAM_CODE_MAP, load_coach_info
+from optimizer.coach_ranking import PRICE_SHEET_TEAM_CODE_MAP
 from optimizer.pick_team import POSITION_REQUIREMENTS
 
 DB_PATH = "data/euroleague.db"
@@ -263,16 +270,33 @@ def resolve_player_ids(names, price_pool, boxscore_players):
     return pd.DataFrame(rows)
 
 
+def load_coach_pool(price_path=PRICE_FILE):
+    """Coaches from the SAME price file the players come from (price_path), via
+    load_prices()'s excluded['head_coaches'] -- so coach and player prices can't
+    come from different snapshots. Same columns as coach_ranking.load_coach_info()
+    (team_code, coach, coach_price), except team_code is the price sheet's own club
+    code, NOT remapped to box-score codes: PRICE_SHEET_TEAM_CODE_MAP is derived from
+    2025 box scores and lacks 2026 clubs (BJK/FBT/MIL), so load_coach_info() would
+    raise on this file. Here team_code is only reported/disambiguated."""
+    _, excluded = load_prices(prices_path=price_path)
+    coaches = excluded["head_coaches"].copy()
+    coaches["team_code"] = coaches["Team"]
+    coaches["coach"] = coaches["Name"].str.strip() + " " + coaches["Surname"].str.strip()
+    coaches = coaches.rename(columns={"Quotation": "coach_price"})
+    return coaches[["team_code", "coach", "coach_price"]]
+
+
 def resolve_coach(name, coach_info):
-    """Match name against load_coach_info()'s 'coach' column (First Last),
-    case-insensitive, same fail-loud contract as resolve_player_ids."""
+    """Match name against load_coach_pool()'s 'coach' column (First Last; the
+    price_path file's head coaches -- same file as the players), case-insensitive,
+    same fail-loud contract as resolve_player_ids."""
     name_norm = name.strip().upper()
     matches = coach_info[coach_info["coach"].str.strip().str.upper() == name_norm]
 
     if len(matches) == 0:
         raise ValueError(
             f"{MY_TEAM_CSV}: coach {name!r} matched zero coaches in the price "
-            f"sheet's head-coach list (data/prices/players_stats.xlsx). Check "
+            f"price file's head-coach list (the price_path file). Check "
             f"spelling -- expected format 'First Last' (e.g. 'Sergio Scariolo')."
         )
     if matches["coach"].nunique() > 1 or matches["team_code"].nunique() > 1:
@@ -353,7 +377,7 @@ def load_my_team(
 
     players = players_raw.merge(resolved, on="player_name", how="left")
 
-    coach_info = load_coach_info()  # reused: from the generic price snapshot
+    coach_info = load_coach_pool(price_path)  # same file as the players
     coach_match = resolve_coach(coach_rows.iloc[0]["player_name"], coach_info)
 
     captain_rows = players[players["captain"].apply(_is_captain)]
