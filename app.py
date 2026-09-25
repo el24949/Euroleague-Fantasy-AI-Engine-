@@ -36,6 +36,7 @@ NO DB WRITE: load_prices_for_round() is called directly here, never store_prices
 data_collection/load_prices_history.py.
 """
 
+import pandas as pd
 import streamlit as st
 
 from data_collection.load_prices_history import load_prices_for_round
@@ -45,6 +46,7 @@ from optimizer.my_team import (
     POSITION_NAME_TO_CODE,
     PRICE_FILE,
     load_coach_pool,
+    load_my_team,
     load_prices,
 )
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
@@ -57,7 +59,91 @@ from pipeline.update_round import (
     run_prediction_step,
 )
 
-st.set_page_config(page_title="EuroLeague Fantasy -- Recommended Team", layout="wide")
+st.set_page_config(page_title="EuroLeague Fantasy -- My Team", layout="wide")
+
+# Minimal CSS: Inter font + a bit of spacing + orange section headers, nothing
+# else -- no custom card components, backgrounds stay in .streamlit/config.toml's
+# theme. Header orange = the theme's primaryColor, the single accent color.
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    div[data-testid="stMetricValue"] { font-size: 2rem; }
+    .block-container { padding-top: 2.5rem; }
+    div[data-testid="stHeading"] h1,
+    div[data-testid="stHeading"] h2,
+    div[data-testid="stHeading"] h3 { color: #FF6B1A; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+ROLE_LABELS = {"starter": "Starters", "6th_man": "6th Man", "bench": "Bench"}
+ROLE_ORDER = ["starter", "6th_man", "bench"]
+
+
+@st.cache_data
+def load_my_team_cached():
+    """load_my_team() (optimizer/my_team.py) behind a cached function, same
+    pattern as load_player_table/load_coach_table -- it parses the price
+    Excel sheet and queries the DB, so it shouldn't rerun on every widget
+    interaction. Cleared explicitly after a successful save (see the Save
+    section below) so this view reflects the roster just written, not a
+    stale cached read of the file from before the save."""
+    return load_my_team()
+
+
+def render_role_table(players, role):
+    """One role group's players as a clean Player/Position/Price table --
+    Player_ID and the raw role code are never shown. The captain's name gets
+    a '(C)' suffix; nothing else is computed here beyond that display label."""
+    group = players[players["role"] == role]
+    if group.empty:
+        return
+    st.markdown(f"**{ROLE_LABELS[role]}**")
+    display = pd.DataFrame(
+        {
+            "Player": group["player_name"] + group["captain"].apply(
+                lambda v: " (C)" if v == "Y" else ""
+            ),
+            "Position": group["position"],
+            "Price": group["price"],
+        }
+    )
+    st.dataframe(display, width="stretch", hide_index=True)
+
+
+st.title("My Team")
+
+try:
+    my_team = load_my_team_cached()
+except ValueError as exc:
+    st.error(f"Couldn't load data/my_team.csv: {exc}")
+else:
+    my_players = my_team["players"]
+    my_coach = my_team["coach"]
+    my_state = my_team["state"]
+    squad_cost = float(my_players["price"].sum()) + float(my_coach["price"])
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Credits left", f"{my_state['remaining_budget']:.1f}")
+    metric_cols[1].metric("Trades used", my_state["trades_used"])
+    metric_cols[2].metric("Squad cost", f"{squad_cost:.1f} / 100")
+    if squad_cost > 100:
+        metric_cols[2].markdown(":red[Over budget]")
+
+    st.subheader("My Team")
+    for role in ROLE_ORDER:
+        render_role_table(my_players, role)
+
+    st.subheader("Coach")
+    coach_cols = st.columns(3)
+    coach_cols[0].metric("Name", my_coach["name"])
+    coach_cols[1].metric("Team", my_coach["team_code"])
+    coach_cols[2].metric("Price", f"{my_coach['price']:.1f}")
+
+st.divider()
 
 ROUND_OPTIONS = [30, 31, 32, 33, 34, 35, 36]
 
@@ -396,6 +482,7 @@ else:
             if st.button("Save to data/my_team.csv", type="primary"):
                 try:
                     written = save_my_team(save_rows)
+                    load_my_team_cached.clear()  # so the My Team view above reflects this save
                     st.success(f"Saved 11 rows to {written}")
                 except Exception as exc:  # show, never swallow
                     st.error(f"Save failed, my_team.csv unchanged: {exc}")
