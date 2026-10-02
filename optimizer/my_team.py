@@ -70,6 +70,7 @@ import sqlite3
 
 import pandas as pd
 
+from data_collection.latest_prices import find_latest_price_file
 from data_collection.load_prices import load_prices
 from optimizer.coach_ranking import PRICE_SHEET_TEAM_CODE_MAP
 from optimizer.pick_team import POSITION_REQUIREMENTS
@@ -78,8 +79,16 @@ DB_PATH = "data/euroleague.db"
 MY_TEAM_CSV = "data/my_team.csv"
 MY_TEAM_STATE_CSV = "data/my_team_state.csv"
 SEASON = 2026
-PRICE_ROUND = 1
-PRICE_FILE = f"data/prices/round_{PRICE_ROUND:02d}/players_stats.xlsx"
+
+try:
+    # Prefer the most recently uploaded round price file.
+    _price_path, PRICE_ROUND = find_latest_price_file()
+    PRICE_FILE = str(_price_path)
+except ValueError:
+    # Fallback: uploads folder is empty/missing -- use the known-good
+    # round-1 snapshot so this module still imports.
+    PRICE_ROUND = 1
+    PRICE_FILE = "data/prices/round_01/players_stats.xlsx"
 
 # Season 2026 boxscores are empty (no games played), so a placeholder-ID
 # player can't be recovered from SEASON itself -- 2025 is the most recent
