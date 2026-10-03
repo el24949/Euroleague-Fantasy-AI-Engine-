@@ -233,7 +233,12 @@ def suggest_trades(current_team, max_trades, season, round_no, budget=BUDGET):
                 "in_player": in_row["display_name"],
                 "out_price": float(out_row["price"]),
                 "in_price": float(in_row["price"]),
-                "position": out_row["position"],
+                # Separate fields -- a pairing is cosmetic (see the sort above),
+                # so the out and in player are NOT guaranteed to share a
+                # position; collapsing both into one "position" field silently
+                # mislabeled the in player whenever they differed.
+                "out_position": out_row["position"],
+                "in_position": in_row["position"],
                 "projected_gain": round(float(in_row["objective_score"] - out_row["objective_score"]), 2),
             }
         )
@@ -285,8 +290,8 @@ if __name__ == "__main__":
         print("\nSuggested swaps:")
         for swap in result["swaps"]:
             print(
-                f"  OUT {swap['out_player']} ({swap['position']}, {swap['out_price']:.1f}) "
-                f"-> IN {swap['in_player']} ({swap['position']}, {swap['in_price']:.1f}) "
+                f"  OUT {swap['out_player']} ({swap['out_position']}, {swap['out_price']:.1f}) "
+                f"-> IN {swap['in_player']} ({swap['in_position']}, {swap['in_price']:.1f}) "
                 f"[gain {swap['projected_gain']:+.2f}]"
             )
     else:

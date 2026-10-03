@@ -47,10 +47,15 @@ from my_team_writer import read_header_comments, render_csv, save_my_team
 from optimizer.my_team import (
     POSITION_NAME_TO_CODE,
     PRICE_FILE,
+    RECOVERY_SEASON,
     SEASON as LIVE_SEASON,
+    load_boxscore_players,
     load_coach_pool,
     load_my_team,
     load_prices,
+    load_price_pool,
+    resolve_coach,
+    resolve_player_ids,
 )
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
@@ -129,6 +134,98 @@ def render_role_table(players, role):
         }
     )
     st.dataframe(display, width="stretch", hide_index=True)
+
+
+REQUIRED_POSITION_COUNTS = {"G": 4, "F": 4, "C": 2}
+
+
+@st.cache_data
+def load_player_table():
+    """optimizer.my_team.load_prices() behind a cached function, same pattern as
+    load_recommendation -- it parses an Excel file, so it shouldn't run on every
+    rerun. load_prices() returns (df, meta_dict) of excluded rows (head coaches,
+    missing position, placeholder ID); this slice only needs the usable df, so
+    meta_dict is discarded here and never returned."""
+    df, _meta = load_prices()
+    return df
+
+
+@st.cache_data
+def load_round_features_for(season, round_no):
+    """Same reuse as load_round_features below (run_prediction_step() behind a
+    cache), just parameterized by season too -- needed because Suggest Trades
+    (and Apply these trades, which re-assigns roles for the same season/round
+    the suggestion was computed for) can target Season 2025 or 2026, not only
+    pipeline/update_round.py's own module-level SEASON=2025 the rest of this
+    page's "Recommended Team"/"Squad roles" sections use."""
+    return run_prediction_step(get_round_gamecodes(season, round_no))
+
+
+def assign_squad_roles(round_features, selected_df):
+    """Slice 6: run the existing solve_lineup() with the roster FIXED to the
+    selected squad. Returns (result_df, error_message); exactly one is None.
+
+    The candidate pool is restricted to the selected Player_IDs AND those rows
+    are forced onto the roster (fixed_roster_idx), so only roles + formation are
+    optimized. Formation/weights/risk objective come from pick_lineup_ilp
+    unchanged. Captain is NOT decided by the ILP (captain_multiplier=1.0 zeroes
+    its bonus and its captain pick is ignored): it is a post-step over T1
+    starters only. Prices are the live price table's, same as the legality check.
+
+    Moved up from its original position further down this file (same body,
+    unchanged) so the Suggest Trades / Apply These Trades section above can
+    call it too -- Streamlit executes this script top-to-bottom, so a function
+    must be defined before the first section that uses it."""
+    selected_ids = set(selected_df["Player_ID"].str.strip())
+    pool = round_features[round_features["Player_ID"].str.strip().isin(selected_ids)].copy()
+    pool["Player_ID"] = pool["Player_ID"].str.strip()
+
+    missing = selected_df[~selected_df["Player_ID"].str.strip().isin(set(pool["Player_ID"]))]
+    if len(missing):
+        names = [f"{r.Surname.upper()}, {r.Name}" for r in missing.itertuples()]
+        return None, (
+            "No prediction available this round for: " + "; ".join(names)
+            + " (did not play, or not enough prior history)."
+        )
+    if pool["Player_ID"].duplicated().any():
+        return None, "Duplicate Player_ID rows in this round's features."
+
+    # Position + price both come from the price sheet (the source the slice-5
+    # legality check used) -- NOT attach_positions(): box-score positions can
+    # disagree with the price sheet for a player, and the squad's legal 4G/4F/2C
+    # shape is defined by the price sheet.
+    sheet = selected_df.assign(Player_ID=selected_df["Player_ID"].str.strip()).set_index("Player_ID")
+    pool["position"] = pool["Player_ID"].map(sheet["Position"].map(POSITION_NAME_TO_CODE))
+    pool["price"] = pool["Player_ID"].map(sheet["Quotation"])
+    pool = attach_turns(pool, build_turn_lookup(SEASON))
+    pool["objective_score"] = pool["predicted_score"] - RISK_LAMBDA * pool["consistency_5"]
+
+    pos_counts = pool["position"].value_counts().to_dict()
+    if any(pos_counts.get(p, 0) != n for p, n in REQUIRED_POSITION_COUNTS.items()):
+        return None, f"Squad positions don't form 4G/4F/2C: {pos_counts}"
+
+    result = solve_lineup(
+        pool,
+        "objective_score",
+        1.0,  # captain handled below as a post-step, not by the ILP
+        budget=BUDGET,
+        fixed_roster_idx=pool.index,
+    )
+    if result["status"] != "Optimal":
+        return None, f"Solver status: {result['status']}"
+
+    role_by_idx = {i: "Starter" for i in result["starters_idx"]}
+    role_by_idx.update({i: "6th Man" for i in result["sixth_idx"]})
+    role_by_idx.update({i: "Bench" for i in result["bench_idx"]})
+    pool["role"] = pool.index.map(role_by_idx)
+
+    t1_starters = pool[(pool["role"] == "Starter") & (pool["turn"] == "T1")]
+    if t1_starters.empty:
+        return None, "No T1 starter to captain -- none of the starters plays in turn 1."
+    captain_idx = t1_starters["predicted_score"].idxmax()
+    pool["captain"] = pool.index == captain_idx
+    pool.attrs["formation"] = result["formation"]
+    return pool, None
 
 
 # ---- Upload round prices ----
@@ -300,54 +397,204 @@ if st.button("Suggest trades", type="primary"):
             # data yet for this round -- show it, never crash the page.
             st.error(f"Couldn't compute trade suggestions for round {int(target_round)}: {exc}")
         else:
-            score_cols = st.columns(2)
-            score_cols[0].metric("Current projected score", f"{trade_result['current_score']:.2f}")
-            score_cols[1].metric(
-                "Projected score after trades",
-                f"{trade_result['projected_score']:.2f}",
-                delta=f"{trade_result['projected_score'] - trade_result['current_score']:+.2f}",
-            )
+            # Stashed in session_state (not just a local variable) because
+            # Streamlit reruns this whole script on every interaction -- the
+            # "Apply these trades" button below needs this SAME result on a
+            # LATER rerun, not a recompute (suggest_trades can be slow, and
+            # re-running it could legitimately return a different answer).
+            st.session_state["trade_result"] = trade_result
+            st.session_state["trade_context"] = {
+                "season": trade_season,
+                "round_no": int(target_round),
+            }
+            st.session_state.pop("apply_trades_pending", None)  # stale preview
 
-            trades_label = (
-                f"{trade_result['trades_used']} / unlimited"
-                if trade_result["max_trades"] is None
-                else f"{trade_result['trades_used']} / {trade_result['max_trades']}"
-            )
-            cost_cols = st.columns(2)
-            cost_cols[0].metric("Trades used", trades_label)
-            cost_cols[1].metric(
-                "Resulting total cost", f"{trade_result['resulting_total_cost']:.1f} / {BUDGET}"
-            )
-            if trade_result["resulting_total_cost"] > BUDGET:
-                cost_cols[1].markdown(":red[Over budget]")
+trade_result = st.session_state.get("trade_result")
+if trade_result is not None and trade_result["swaps"] and "out_position" not in trade_result["swaps"][0]:
+    # A result cached in session_state from BEFORE a swap-dict schema change
+    # (e.g. this app was edited and hot-reloaded mid-session) -- discard it
+    # instead of KeyError-ing on a since-renamed field. Confirmed reproducible:
+    # an old-shaped {"position": ...} dict run through today's rename/column
+    # selection raises exactly "['Out pos', 'In pos'] not in index".
+    st.session_state.pop("trade_result", None)
+    st.session_state.pop("trade_context", None)
+    st.session_state.pop("apply_trades_pending", None)
+    trade_result = None
+    st.info("Trade suggestions were cleared after an app update -- click 'Suggest trades' again.")
 
-            if trade_result["swaps"]:
-                st.subheader("Suggested swaps")
-                swap_table = pd.DataFrame(trade_result["swaps"]).rename(
-                    columns={
-                        "out_player": "Out",
-                        "out_price": "Out price",
-                        "in_player": "In",
-                        "in_price": "In price",
-                        "position": "Position",
-                        "projected_gain": "Gain",
+if trade_result is not None:
+    score_cols = st.columns(2)
+    score_cols[0].metric("Current projected score", f"{trade_result['current_score']:.2f}")
+    score_cols[1].metric(
+        "Projected score after trades",
+        f"{trade_result['projected_score']:.2f}",
+        delta=f"{trade_result['projected_score'] - trade_result['current_score']:+.2f}",
+    )
+
+    trades_label = (
+        f"{trade_result['trades_used']} / unlimited"
+        if trade_result["max_trades"] is None
+        else f"{trade_result['trades_used']} / {trade_result['max_trades']}"
+    )
+    cost_cols = st.columns(2)
+    cost_cols[0].metric("Trades used", trades_label)
+    cost_cols[1].metric(
+        "Resulting total cost", f"{trade_result['resulting_total_cost']:.1f} / {BUDGET}"
+    )
+    if trade_result["resulting_total_cost"] > BUDGET:
+        cost_cols[1].markdown(":red[Over budget]")
+
+    if trade_result["swaps"]:
+        st.subheader("Suggested swaps")
+        swap_table = pd.DataFrame(trade_result["swaps"]).rename(
+            columns={
+                "out_player": "Out",
+                "out_price": "Out price",
+                "out_position": "Out pos",
+                "in_player": "In",
+                "in_price": "In price",
+                "in_position": "In pos",
+                "projected_gain": "Gain",
+            }
+        )[["Out", "Out pos", "Out price", "In", "In pos", "In price", "Gain"]]
+        st.dataframe(
+            swap_table.style.map(
+                lambda v: f"color: {'green' if v >= 0 else 'red'}", subset=["Gain"]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.success("No trades suggested -- your team is already optimal within the limit.")
+
+    coach_change = trade_result["coach_change"]
+    if coach_change["changed"]:
+        st.write(f"Coach change: {coach_change['from']} -> {coach_change['to']}")
+    else:
+        st.write(f"Coach unchanged: {coach_change['from']}")
+
+    # ---- Apply these trades: write the new roster to data/my_team.csv ----
+    st.subheader("Apply these trades")
+    st.caption(
+        "Builds the new 10-player squad from the swaps above, re-assigns roles "
+        "with the same optimizer the Squad roles section below uses, and "
+        "OVERWRITES data/my_team.csv. First save backs up the old file to "
+        "my_team.csv.bak; the write is atomic. Does NOT touch "
+        "data/my_team_state.csv -- trades_used is still yours to update."
+    )
+
+    if not trade_result["swaps"] and not coach_change["changed"]:
+        st.caption("Nothing to apply -- no trades were suggested.")
+    else:
+        if st.button("Apply these trades", key="apply_trades_button"):
+            try:
+                current_for_apply = load_my_team_cached()
+                trade_ctx = st.session_state["trade_context"]
+                # load_price_pool() (the live PRICE_FILE) -- NOT load_player_table()
+                # (load_prices() with no path, which defaults to the older generic
+                # data/prices/players_stats.xlsx). suggest_trades.py's own position
+                # constraint was solved against load_price_pool(); rebuilding the
+                # squad from a DIFFERENT price file risks a player having a
+                # different Position/Team there than what the optimizer actually
+                # used, breaking the 4G/4F/2C shape it already guaranteed.
+                price_pool_for_apply = load_price_pool()
+                usable_pool_for_apply = price_pool_for_apply[
+                    ~price_pool_for_apply["is_placeholder"]
+                ]
+
+                out_names = {s["out_player"] for s in trade_result["swaps"]}
+                kept = current_for_apply["players"][
+                    ~current_for_apply["players"]["player_name"].isin(out_names)
+                ]
+                kept_ids = kept["Player_ID"].tolist()
+
+                in_names = [s["in_player"] for s in trade_result["swaps"]]
+                if in_names:
+                    # resolve_player_ids is the SAME name->Player_ID resolver
+                    # load_my_team() itself uses -- fails loudly on a zero/
+                    # ambiguous match rather than guessing.
+                    resolved_in = resolve_player_ids(
+                        in_names, price_pool_for_apply, load_boxscore_players(RECOVERY_SEASON)
+                    )
+                    new_ids = resolved_in["Player_ID"].tolist()
+                else:
+                    new_ids = []
+
+                new_squad_df = usable_pool_for_apply[
+                    usable_pool_for_apply["Player_ID"].isin(kept_ids + new_ids)
+                ].copy()
+                if len(new_squad_df) != 10:
+                    raise ValueError(
+                        f"Expected 10 players after applying trades, found "
+                        f"{len(new_squad_df)} -- a swapped-in player may not be a "
+                        "usable row in the current price file."
+                    )
+
+                if coach_change["changed"]:
+                    coach_match = resolve_coach(coach_change["to"], load_coach_pool())
+                    new_coach = {
+                        "name": coach_match["coach"],
+                        "team_code": coach_match["team_code"],
+                        "price": coach_match["coach_price"],
                     }
-                )[["Out", "Out price", "In", "In price", "Position", "Gain"]]
-                st.dataframe(
-                    swap_table.style.map(
-                        lambda v: f"color: {'green' if v >= 0 else 'red'}", subset=["Gain"]
-                    ),
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.success("No trades suggested -- your team is already optimal within the limit.")
+                else:
+                    new_coach = current_for_apply["coach"]
 
-            coach_change = trade_result["coach_change"]
-            if coach_change["changed"]:
-                st.write(f"Coach change: {coach_change['from']} -> {coach_change['to']}")
+                round_features_for_apply = load_round_features_for(
+                    trade_ctx["season"], trade_ctx["round_no"]
+                )
+                new_squad_result, new_squad_error = assign_squad_roles(
+                    round_features_for_apply, new_squad_df
+                )
+            except Exception as exc:
+                st.error(f"Couldn't apply trades: {exc}")
             else:
-                st.write(f"Coach unchanged: {coach_change['from']}")
+                if new_squad_error:
+                    st.error(f"Couldn't assign roles for the new squad: {new_squad_error}")
+                else:
+                    sheet_names = {
+                        r.Player_ID.strip(): f"{r.Surname.upper()}, {r.Name}"
+                        for r in new_squad_df.itertuples()
+                    }
+                    role_csv = {"Starter": "starter", "6th Man": "6th_man", "Bench": "bench"}
+                    apply_save_rows = [
+                        {
+                            "player_name": sheet_names[r.Player_ID],
+                            "role": role_csv[r.role],
+                            "captain": "Y" if r.captain else "",
+                        }
+                        for r in new_squad_result.itertuples()
+                    ] + [{"player_name": new_coach["name"], "role": "coach", "captain": ""}]
+
+                    # Staged, not written yet -- see the "Confirm save" button
+                    # below. Same two-click pattern as the price-upload
+                    # overwrite guard above: nothing touches disk on this click.
+                    st.session_state["apply_trades_pending"] = {
+                        "save_rows": apply_save_rows,
+                        "preview_text": render_csv(apply_save_rows, read_header_comments()),
+                    }
+
+        pending_apply = st.session_state.get("apply_trades_pending")
+        if pending_apply:
+            st.subheader("Preview -- exact file content that will be written")
+            st.code(pending_apply["preview_text"], language="text")
+            apply_confirm_cols = st.columns(2)
+            if apply_confirm_cols[0].button(
+                "Confirm save", type="primary", key="confirm_apply_trades"
+            ):
+                try:
+                    written = save_my_team(pending_apply["save_rows"])
+                except Exception as exc:
+                    st.error(f"Save failed, my_team.csv unchanged: {exc}")
+                else:
+                    load_my_team_cached.clear()  # so "My Team" above reflects this save
+                    st.success(f"Saved 11 rows to {written}")
+                    del st.session_state["apply_trades_pending"]
+                    # The applied suggestion is now stale against the new roster.
+                    st.session_state.pop("trade_result", None)
+                    st.session_state.pop("trade_context", None)
+            if apply_confirm_cols[1].button("Cancel", key="cancel_apply_trades"):
+                del st.session_state["apply_trades_pending"]
 
 st.divider()
 
@@ -375,68 +622,6 @@ def load_round_features(round_no):
     return run_prediction_step(get_round_gamecodes(SEASON, round_no))
 
 
-def assign_squad_roles(round_features, selected_df):
-    """Slice 6: run the existing solve_lineup() with the roster FIXED to the
-    selected squad. Returns (result_df, error_message); exactly one is None.
-
-    The candidate pool is restricted to the selected Player_IDs AND those rows
-    are forced onto the roster (fixed_roster_idx), so only roles + formation are
-    optimized. Formation/weights/risk objective come from pick_lineup_ilp
-    unchanged. Captain is NOT decided by the ILP (captain_multiplier=1.0 zeroes
-    its bonus and its captain pick is ignored): it is a post-step over T1
-    starters only. Prices are the live price table's, same as the legality check."""
-    selected_ids = set(selected_df["Player_ID"].str.strip())
-    pool = round_features[round_features["Player_ID"].str.strip().isin(selected_ids)].copy()
-    pool["Player_ID"] = pool["Player_ID"].str.strip()
-
-    missing = selected_df[~selected_df["Player_ID"].str.strip().isin(set(pool["Player_ID"]))]
-    if len(missing):
-        names = [f"{r.Surname.upper()}, {r.Name}" for r in missing.itertuples()]
-        return None, (
-            "No prediction available this round for: " + "; ".join(names)
-            + " (did not play, or not enough prior history)."
-        )
-    if pool["Player_ID"].duplicated().any():
-        return None, "Duplicate Player_ID rows in this round's features."
-
-    # Position + price both come from the price sheet (the source the slice-5
-    # legality check used) -- NOT attach_positions(): box-score positions can
-    # disagree with the price sheet for a player, and the squad's legal 4G/4F/2C
-    # shape is defined by the price sheet.
-    sheet = selected_df.assign(Player_ID=selected_df["Player_ID"].str.strip()).set_index("Player_ID")
-    pool["position"] = pool["Player_ID"].map(sheet["Position"].map(POSITION_NAME_TO_CODE))
-    pool["price"] = pool["Player_ID"].map(sheet["Quotation"])
-    pool = attach_turns(pool, build_turn_lookup(SEASON))
-    pool["objective_score"] = pool["predicted_score"] - RISK_LAMBDA * pool["consistency_5"]
-
-    pos_counts = pool["position"].value_counts().to_dict()
-    if any(pos_counts.get(p, 0) != n for p, n in REQUIRED_POSITION_COUNTS.items()):
-        return None, f"Squad positions don't form 4G/4F/2C: {pos_counts}"
-
-    result = solve_lineup(
-        pool,
-        "objective_score",
-        1.0,  # captain handled below as a post-step, not by the ILP
-        budget=BUDGET,
-        fixed_roster_idx=pool.index,
-    )
-    if result["status"] != "Optimal":
-        return None, f"Solver status: {result['status']}"
-
-    role_by_idx = {i: "Starter" for i in result["starters_idx"]}
-    role_by_idx.update({i: "6th Man" for i in result["sixth_idx"]})
-    role_by_idx.update({i: "Bench" for i in result["bench_idx"]})
-    pool["role"] = pool.index.map(role_by_idx)
-
-    t1_starters = pool[(pool["role"] == "Starter") & (pool["turn"] == "T1")]
-    if t1_starters.empty:
-        return None, "No T1 starter to captain -- none of the starters plays in turn 1."
-    captain_idx = t1_starters["predicted_score"].idxmax()
-    pool["captain"] = pool.index == captain_idx
-    pool.attrs["formation"] = result["formation"]
-    return pool, None
-
-
 @st.cache_data
 def load_coach_table():
     """optimizer.my_team.load_coach_pool(PRICE_FILE) behind a cached function: the
@@ -444,17 +629,6 @@ def load_coach_table():
     reads them from, so the app's coach price and the loader's are one value.
     Sorted by price (desc) for a stable picker order."""
     return load_coach_pool(PRICE_FILE).sort_values("coach_price", ascending=False).to_dict("records")
-
-
-@st.cache_data
-def load_player_table():
-    """optimizer.my_team.load_prices() behind a cached function, same pattern as
-    load_recommendation -- it parses an Excel file, so it shouldn't run on every
-    rerun. load_prices() returns (df, meta_dict) of excluded rows (head coaches,
-    missing position, placeholder ID); this slice only needs the usable df, so
-    meta_dict is discarded here and never returned."""
-    df, _meta = load_prices()
-    return df
 
 
 st.caption(
@@ -580,7 +754,6 @@ st.caption(
     "blocks or removes a pick. A partial squad (<10) is a normal in-progress state."
 )
 
-REQUIRED_POSITION_COUNTS = {"G": 4, "F": 4, "C": 2}
 POSITION_LABELS = {"G": "Guards", "F": "Forwards", "C": "Centers"}
 SQUAD_SIZE = 10
 
