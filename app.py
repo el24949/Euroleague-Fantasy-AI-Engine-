@@ -36,6 +36,8 @@ NO DB WRITE: load_prices_for_round() is called directly here, never store_prices
 data_collection/load_prices_history.py.
 """
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -113,6 +115,77 @@ def render_role_table(players, role):
     )
     st.dataframe(display, width="stretch", hide_index=True)
 
+
+# ---- Upload round prices ----
+# Saves the uploaded file under the exact name pattern
+# data_collection.latest_prices.find_latest_price_file expects
+# (players_stats26_<round>.xlsx) so the engine picks it up as the latest
+# round's prices on its next run/rerun. This section only writes the file --
+# it never reloads PRICE_FILE, re-imports optimizer.my_team, or recomputes
+# anything.
+UPLOADS_DIR = Path("data/prices/uploads")
+
+st.header("Upload round prices")
+st.caption(
+    "Upload this round's players_stats Excel file. Once saved, the engine will "
+    "use it as the latest round's prices on its next run/rerun."
+)
+
+uploaded_price_file = st.file_uploader(
+    "Price file (.xlsx)", type=["xlsx"], key="price_upload_file"
+)
+upload_round_no = st.number_input(
+    "Which round is this price file for?",
+    min_value=1,
+    step=1,
+    value=None,
+    format="%d",
+    key="price_upload_round",
+)
+
+if st.button("Save price file"):
+    if uploaded_price_file is None:
+        st.error("Choose a .xlsx price file first.")
+    elif upload_round_no is None:
+        st.error("Enter which round this price file is for.")
+    elif not uploaded_price_file.name.lower().endswith(".xlsx"):
+        st.error("Only .xlsx files are accepted.")
+    else:
+        target_path = UPLOADS_DIR / f"players_stats26_{int(upload_round_no)}.xlsx"
+        if target_path.exists():
+            # Don't silently overwrite -- stage it and require a second,
+            # explicit confirmation click below.
+            st.session_state["price_upload_pending"] = {
+                "bytes": uploaded_price_file.getvalue(),
+                "path": str(target_path),
+                "round": int(upload_round_no),
+            }
+        else:
+            UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(uploaded_price_file.getvalue())
+            st.success(
+                f"Saved to {target_path} (round {int(upload_round_no)}). "
+                "The engine will use this as the latest round's prices on its next run."
+            )
+
+pending_upload = st.session_state.get("price_upload_pending")
+if pending_upload:
+    st.warning(
+        f"A price file for round {pending_upload['round']} already exists at "
+        f"{pending_upload['path']}. Overwrite it?"
+    )
+    confirm_cols = st.columns(2)
+    if confirm_cols[0].button("Yes, overwrite", type="primary", key="confirm_price_overwrite"):
+        Path(pending_upload["path"]).write_bytes(pending_upload["bytes"])
+        st.success(
+            f"Overwrote {pending_upload['path']} (round {pending_upload['round']}). "
+            "The engine will use this as the latest round's prices on its next run."
+        )
+        del st.session_state["price_upload_pending"]
+    if confirm_cols[1].button("Cancel", key="cancel_price_overwrite"):
+        del st.session_state["price_upload_pending"]
+
+st.divider()
 
 st.title("My Team")
 
