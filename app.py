@@ -47,18 +47,21 @@ from my_team_writer import read_header_comments, render_csv, save_my_team
 from optimizer.my_team import (
     POSITION_NAME_TO_CODE,
     PRICE_FILE,
+    SEASON as LIVE_SEASON,
     load_coach_pool,
     load_my_team,
     load_prices,
 )
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
+from optimizer.suggest_trades import suggest_trades
 from optimizer.turn_join import attach_turns
 from pipeline.update_round import (
     SEASON,
     get_recommended_team,
     get_round_gamecodes,
     run_prediction_step,
+    status_summary,
 )
 
 st.set_page_config(page_title="EuroLeague Fantasy -- My Team", layout="wide")
@@ -94,6 +97,18 @@ def load_my_team_cached():
     section below) so this view reflects the roster just written, not a
     stale cached read of the file from before the save."""
     return load_my_team()
+
+
+@st.cache_data
+def get_next_round_cached(season):
+    """status_summary() (pipeline/update_round.py) behind a cached function --
+    reuses its Schedule-based round<->gamecode mapping (never a hardcoded
+    "round N = gamecodes ..." formula) to find the first round with any
+    scheduled game missing from the boxscores table, i.e. the next round to
+    pick a team for. Only next_round is used here; status_summary's other
+    stats and its own prints (to the server console, not this page) aren't
+    needed."""
+    return status_summary(season)["next_round"]
 
 
 def render_role_table(players, role):
@@ -215,6 +230,124 @@ else:
     coach_cols[0].metric("Name", my_coach["name"])
     coach_cols[1].metric("Team", my_coach["team_code"])
     coach_cols[2].metric("Price", f"{my_coach['price']:.1f}")
+
+st.divider()
+st.header("Suggest trades")
+st.caption(
+    "Runs the existing trade-suggestion optimizer (optimizer/suggest_trades.py) "
+    "for the round below. Display only -- nothing is saved to data/my_team.csv "
+    "in this step."
+)
+
+trade_season = st.selectbox(
+    "Season",
+    options=[2026, 2025],
+    index=[2026, 2025].index(LIVE_SEASON),
+    key="trade_season",
+)
+st.caption(
+    "2026 is the live season; 2025 has full history and is useful for testing "
+    "the button."
+)
+
+auto_next_round = get_next_round_cached(trade_season)
+if auto_next_round is None:
+    st.warning(
+        f"Couldn't auto-detect the next round for Season {trade_season} -- every "
+        "scheduled round already has box scores. Pick a round number manually below."
+    )
+    default_round = 1
+else:
+    st.caption(f"Auto-detected next round: {auto_next_round} (last round with box scores + 1).")
+    default_round = auto_next_round
+
+target_round = st.number_input(
+    "Predict for round",
+    min_value=1,
+    step=1,
+    value=default_round,
+    key="trade_target_round",
+)
+
+trade_input_cols = st.columns(2)
+unlimited_trades = trade_input_cols[0].checkbox("Unlimited trades", key="unlimited_trades")
+max_trades_input = trade_input_cols[1].number_input(
+    "Max trades this round",
+    min_value=0,
+    step=1,
+    value=4,
+    disabled=unlimited_trades,
+    key="max_trades_input",
+)
+st.caption("Unlimited-trade rounds this season: after R6, R13, R18, R23, R28, R34.")
+
+if st.button("Suggest trades", type="primary"):
+    try:
+        my_team_for_trades = load_my_team_cached()
+    except ValueError as exc:
+        st.error(f"Couldn't load data/my_team.csv: {exc}")
+    else:
+        max_trades = None if unlimited_trades else int(max_trades_input)
+        try:
+            trade_result = suggest_trades(
+                my_team_for_trades,
+                max_trades,
+                season=trade_season,
+                round_no=int(target_round),
+                budget=BUDGET,
+            )
+        except Exception as exc:  # e.g. no scheduled games, or no prior-history
+            # data yet for this round -- show it, never crash the page.
+            st.error(f"Couldn't compute trade suggestions for round {int(target_round)}: {exc}")
+        else:
+            score_cols = st.columns(2)
+            score_cols[0].metric("Current projected score", f"{trade_result['current_score']:.2f}")
+            score_cols[1].metric(
+                "Projected score after trades",
+                f"{trade_result['projected_score']:.2f}",
+                delta=f"{trade_result['projected_score'] - trade_result['current_score']:+.2f}",
+            )
+
+            trades_label = (
+                f"{trade_result['trades_used']} / unlimited"
+                if trade_result["max_trades"] is None
+                else f"{trade_result['trades_used']} / {trade_result['max_trades']}"
+            )
+            cost_cols = st.columns(2)
+            cost_cols[0].metric("Trades used", trades_label)
+            cost_cols[1].metric(
+                "Resulting total cost", f"{trade_result['resulting_total_cost']:.1f} / {BUDGET}"
+            )
+            if trade_result["resulting_total_cost"] > BUDGET:
+                cost_cols[1].markdown(":red[Over budget]")
+
+            if trade_result["swaps"]:
+                st.subheader("Suggested swaps")
+                swap_table = pd.DataFrame(trade_result["swaps"]).rename(
+                    columns={
+                        "out_player": "Out",
+                        "out_price": "Out price",
+                        "in_player": "In",
+                        "in_price": "In price",
+                        "position": "Position",
+                        "projected_gain": "Gain",
+                    }
+                )[["Out", "Out price", "In", "In price", "Position", "Gain"]]
+                st.dataframe(
+                    swap_table.style.map(
+                        lambda v: f"color: {'green' if v >= 0 else 'red'}", subset=["Gain"]
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.success("No trades suggested -- your team is already optimal within the limit.")
+
+            coach_change = trade_result["coach_change"]
+            if coach_change["changed"]:
+                st.write(f"Coach change: {coach_change['from']} -> {coach_change['to']}")
+            else:
+                st.write(f"Coach unchanged: {coach_change['from']}")
 
 st.divider()
 
