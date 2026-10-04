@@ -48,18 +48,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from data_collection.latest_prices import find_latest_price_file
 from data_collection.load_prices_history import load_prices_for_round
 from features.turn_tags import build_turn_lookup
 from my_team_writer import read_header_comments, render_csv, save_my_team
 from optimizer.my_team import (
     POSITION_NAME_TO_CODE,
-    PRICE_FILE,
     RECOVERY_SEASON,
     SEASON as LIVE_SEASON,
     load_boxscore_players,
     load_coach_pool,
     load_my_team,
-    load_prices,
     load_price_pool,
     resolve_coach,
     resolve_player_ids,
@@ -145,16 +144,41 @@ def render_role_table(players, role):
 
 REQUIRED_POSITION_COUNTS = {"G": 4, "F": 4, "C": 2}
 
+FALLBACK_PRICE_FILE = "data/prices/round_01/players_stats.xlsx"
+
+
+def current_price_path():
+    """The latest uploaded price file (data/prices/uploads), resolved at
+    RUNTIME on every call -- NOT optimizer.my_team.PRICE_FILE, which is a
+    constant fixed once when that module is first imported (server startup)
+    and would keep pointing at a stale file for the rest of the server's
+    life, missing anything uploaded while the app is already running. Same
+    not-found fallback optimizer.my_team.PRICE_FILE uses, so an empty
+    uploads folder still doesn't crash the app. Cheap (a directory listing),
+    so it's called plainly, not behind @st.cache_data."""
+    try:
+        path, _round_no = find_latest_price_file()
+        return str(path)
+    except ValueError:
+        return FALLBACK_PRICE_FILE
+
 
 @st.cache_data
-def load_player_table():
-    """optimizer.my_team.load_prices() behind a cached function, same pattern as
-    load_recommendation -- it parses an Excel file, so it shouldn't run on every
-    rerun. load_prices() returns (df, meta_dict) of excluded rows (head coaches,
-    missing position, placeholder ID); this slice only needs the usable df, so
-    meta_dict is discarded here and never returned."""
-    df, _meta = load_prices()
-    return df
+def load_player_table(price_path):
+    """optimizer.my_team.load_price_pool(price_path) behind a cached function,
+    keyed on price_path (an argument, not the module-level PRICE_FILE
+    constant) so a newly uploaded file gets its own cache entry instead of
+    replaying a stale one. Replaces the old data_collection.load_prices.
+    load_prices() call, which defaulted to the unrelated, older generic
+    data/prices/players_stats.xlsx (a 2025 file) -- load_price_pool() is the
+    SAME loader load_my_team()/suggest_trades() already use, so the squad
+    picker now shows the identical player list/prices/positions as the rest
+    of the app. Placeholder-ID rows (Player_ID is None -- e.g. Valanciunas on
+    the 2026 sheet) are dropped: they have no usable Player_ID to pick by in
+    a dropdown, and recovering one (recover_placeholder_id) only makes sense
+    for a name actually typed into my_team.csv, not for every such row."""
+    pool = load_price_pool(price_path)
+    return pool[~pool["is_placeholder"]].reset_index(drop=True)
 
 
 @st.cache_data
@@ -257,12 +281,14 @@ def load_round_features(round_no):
 
 
 @st.cache_data
-def load_coach_table():
-    """optimizer.my_team.load_coach_pool(PRICE_FILE) behind a cached function: the
-    head coaches (name + price) from the SAME round_01 price file load_my_team()
-    reads them from, so the app's coach price and the loader's are one value.
-    Sorted by price (desc) for a stable picker order."""
-    return load_coach_pool(PRICE_FILE).sort_values("coach_price", ascending=False).to_dict("records")
+def load_coach_table(price_path):
+    """optimizer.my_team.load_coach_pool(price_path) behind a cached function,
+    keyed on price_path (same reasoning as load_player_table) -- the head
+    coaches (name + price) from the SAME latest-upload price file the squad
+    picker's players come from, so the app's coach price and the player
+    prices can never come from two different snapshots. Sorted by price
+    (desc) for a stable picker order."""
+    return load_coach_pool(price_path).sort_values("coach_price", ascending=False).to_dict("records")
 
 
 tab_my_team, tab_manual = st.tabs(["My Team", "Manual"])
@@ -625,6 +651,11 @@ with tab_manual:
             else:
                 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
                 target_path.write_bytes(uploaded_price_file.getvalue())
+                # Clear every @st.cache_data loader (not just the price ones) so
+                # load_player_table/load_coach_table re-read this new file on the
+                # very next rerun instead of replaying whatever was cached for the
+                # price_path that was "latest" before this upload.
+                st.cache_data.clear()
                 st.success(
                     f"Saved to {target_path} (round {int(upload_round_no)}). "
                     "The engine will use this as the latest round's prices on its next run."
@@ -639,6 +670,7 @@ with tab_manual:
         confirm_cols = st.columns(2)
         if confirm_cols[0].button("Yes, overwrite", type="primary", key="confirm_price_overwrite"):
             Path(pending_upload["path"]).write_bytes(pending_upload["bytes"])
+            st.cache_data.clear()
             st.success(
                 f"Overwrote {pending_upload['path']} (round {pending_upload['round']}). "
                 "The engine will use this as the latest round's prices on its next run."
@@ -756,7 +788,10 @@ with tab_manual:
         "a legal squad. It never blocks a pick and nothing is saved."
     )
 
-    players_df = load_player_table()
+    squad_price_path = current_price_path()
+    st.caption(f"Prices/positions from: {squad_price_path}")
+
+    players_df = load_player_table(squad_price_path)
     player_names = {
         row.Player_ID: f"{row.Surname.upper()}, {row.Name}"
         for row in players_df.itertuples()
@@ -772,11 +807,11 @@ with tab_manual:
 
     # Coach picker lives here (not in the save section) because the coach's price is
     # part of the 100 budget, so it must be known before the legality check runs.
-    # Coaches + prices come from PRICE_FILE (round_01), the same file load_my_team()
-    # uses -- NOT the 2025 round shortlist above, whose prices are from an older sheet.
-    coach_pool = load_coach_table()
+    # Coaches + prices come from the SAME latest-upload file (squad_price_path) the
+    # players above come from -- never a different snapshot.
+    coach_pool = load_coach_table(squad_price_path)
     coach_choice = st.selectbox(
-        f"Coach (from {PRICE_FILE})",
+        f"Coach (from {squad_price_path})",
         options=range(len(coach_pool)),
         index=None,
         placeholder="Pick a coach (its price counts toward the 100 budget)",
