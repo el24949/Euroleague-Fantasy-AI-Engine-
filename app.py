@@ -64,7 +64,7 @@ from optimizer.my_team import (
     resolve_player_ids,
     resolve_pool_placeholder_ids,
 )
-from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
+from optimizer.pick_lineup_ilp import FORMATIONS, RISK_LAMBDA, solve_lineup
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
 from optimizer.suggest_trades import suggest_trades
 from optimizer.turn_join import attach_turns
@@ -907,66 +907,184 @@ with tab_manual:
     st.caption(f"Season {SEASON} round used for role assignment below:")
     round_no = st.selectbox("Round", ROUND_OPTIONS, index=ROUND_OPTIONS.index(32))
 
-    st.header("Squad roles (display-only)")
-    st.caption(
-        f"Roster fixed to your 10 players; the existing lineup optimizer assigns "
-        f"Starter / 6th Man / Bench + formation (risk objective, lambda={RISK_LAMBDA}). "
-        "Captain = highest predicted_score among T1 starters (post-step). Round "
-        f"{round_no}, Season {SEASON}. Nothing is saved."
-    )
+    st.header("Squad roles")
 
     if failures:
         st.info("Complete a legal squad above to assign roles.")
         st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_illegal")
     else:
-        squad_result, squad_error = assign_squad_roles(load_round_features(round_no), selected_df)
-        if squad_error:
-            st.warning(squad_error)
-            st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_noroles")
-        else:
-            st.metric("Formation", squad_result.attrs["formation"])
+        force_manual = st.checkbox(
+            "Set roles manually",
+            key="force_manual_roles",
+            help="Skip the automatic role assignment and pick Starter/6th Man/Bench "
+            "and the captain yourself -- same as what happens automatically when the "
+            "engine can't assign roles for one or more of your 10 players.",
+        )
+
+        auto_squad_result, auto_error = None, None
+        if not force_manual:
+            try:
+                round_features_for_roles = load_round_features(round_no)
+            except Exception as exc:  # e.g. "0 samples" for an early round -- show, don't crash
+                auto_error = f"Prediction step failed for round {round_no}: {exc}"
+            else:
+                auto_squad_result, auto_error = assign_squad_roles(
+                    round_features_for_roles, selected_df
+                )
+
+        manual_mode = force_manual or auto_squad_result is None
+        roles_df = None
+        roles_ready = False
+
+        if not manual_mode:
+            # ---- AUTO (unchanged from before this step) ----
+            st.caption(
+                f"Roster fixed to your 10 players; the existing lineup optimizer assigns "
+                f"Starter / 6th Man / Bench + formation (risk objective, lambda={RISK_LAMBDA}). "
+                "Captain = highest predicted_score among T1 starters (post-step). Round "
+                f"{round_no}, Season {SEASON}. Nothing is saved yet."
+            )
+            st.metric("Formation", auto_squad_result.attrs["formation"])
             role_order = {"Starter": 0, "6th Man": 1, "Bench": 2}
-            squad_table = squad_result.assign(
-                Player=squad_result["Player"] + squad_result["captain"].map({True: " (C)", False: ""}),
-                _order=squad_result["role"].map(role_order),
+            squad_table = auto_squad_result.assign(
+                Player=auto_squad_result["Player"]
+                + auto_squad_result["captain"].map({True: " (C)", False: ""}),
+                _order=auto_squad_result["role"].map(role_order),
             ).sort_values(["_order", "predicted_score"], ascending=[True, False])
             st.dataframe(
                 squad_table[["Player", "role", "position", "turn", "predicted_score"]],
                 width="stretch",
             )
-
-            # ---- Slice 7: save to data/my_team.csv (deliberate click only) ----
-            st.divider()
-            st.header("Save squad to data/my_team.csv")
-            st.caption(
-                "OVERWRITES the file the pipeline reads. First save backs the old file up "
-                "to my_team.csv.bak; the write is atomic. Nothing is written until you click Save."
-            )
-            if coach_choice is None:
-                st.info("Choose a coach to see the rows and enable saving.")
-                st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_nocoach")
+            roles_df = auto_squad_result[["Player_ID", "role", "captain"]].copy()
+            roles_ready = True
+        else:
+            # ---- MANUAL (automatic fallback, or forced by the checkbox) ----
+            if force_manual:
+                st.caption("Manual mode -- set each player's role and the captain yourself below.")
             else:
-                sheet_names = {
-                    r.Player_ID.strip(): f"{r.Surname.upper()}, {r.Name}"
-                    for r in selected_df.itertuples()
+                st.warning(f"Switched to manual roles automatically -- {auto_error}")
+
+            role_options = ["Starter", "6th Man", "Bench"]
+            manual_roles = {}
+            for row in selected_df.itertuples():
+                role_cols = st.columns([3, 2])
+                role_cols[0].write(f"{row.Surname.upper()}, {row.Name} ({row.position})")
+                manual_roles[row.Player_ID] = role_cols[1].selectbox(
+                    "Role",
+                    role_options,
+                    index=2,
+                    key=f"manual_role_{row.Player_ID}",
+                    label_visibility="collapsed",
+                )
+
+            starter_ids = [pid for pid, role in manual_roles.items() if role == "Starter"]
+            starter_names = {
+                row.Player_ID: f"{row.Surname.upper()}, {row.Name}"
+                for row in selected_df.itertuples()
+                if row.Player_ID in starter_ids
+            }
+            if starter_ids:
+                captain_id = st.selectbox(
+                    "Captain",
+                    options=starter_ids,
+                    format_func=lambda pid: starter_names[pid],
+                    index=None,
+                    placeholder="Pick the captain (must be a Starter)",
+                    key="manual_captain",
+                )
+            else:
+                captain_id = None
+                st.caption("Mark at least one player Starter to pick a captain.")
+
+            st.subheader("Manual roles check")
+            manual_failures = []
+
+            manual_role_counts = pd.Series(list(manual_roles.values())).value_counts().to_dict()
+            for role, required in {"Starter": 5, "6th Man": 1, "Bench": 4}.items():
+                actual = manual_role_counts.get(role, 0)
+                if actual == required:
+                    st.write(f"{role}: {actual}/{required} OK")
+                else:
+                    st.write(f"{role}: {actual}/{required} - need exactly {required}")
+                    manual_failures.append(f"{role} {actual}/{required}")
+
+            positions_by_id = selected_df.set_index("Player_ID")["position"]
+            starter_pos_counts = (
+                positions_by_id.loc[starter_ids].value_counts().to_dict() if starter_ids else {}
+            )
+            legal_formation = next(
+                (
+                    name
+                    for name, counts in FORMATIONS.items()
+                    if counts == {p: starter_pos_counts.get(p, 0) for p in ("G", "F", "C")}
+                ),
+                None,
+            )
+            formation_label = (
+                f"G{starter_pos_counts.get('G', 0)}/F{starter_pos_counts.get('F', 0)}/"
+                f"C{starter_pos_counts.get('C', 0)}"
+            )
+            if legal_formation:
+                st.write(f"Starter formation: {legal_formation} OK")
+            else:
+                st.write(
+                    f"Starter formation: {formation_label} - not one of "
+                    f"{', '.join(FORMATIONS)}"
+                )
+                manual_failures.append("formation")
+
+            if captain_id is None:
+                st.write("Captain: none selected - FAIL")
+                manual_failures.append("captain")
+            else:
+                st.write("Captain: OK")
+
+            if not manual_failures:
+                st.success("Manual roles valid")
+                roles_df = pd.DataFrame(
+                    [
+                        {"Player_ID": pid, "role": role, "captain": pid == captain_id}
+                        for pid, role in manual_roles.items()
+                    ]
+                )
+                roles_ready = True
+            else:
+                st.error("Manual roles not valid -- " + "; ".join(manual_failures))
+
+        # ---- Save to data/my_team.csv (shared by auto and manual roles) ----
+        st.divider()
+        st.header("Save squad to data/my_team.csv")
+        st.caption(
+            "OVERWRITES the file the pipeline reads. First save backs the old file up "
+            "to my_team.csv.bak; the write is atomic. Nothing is written until you click Save."
+        )
+        if not roles_ready:
+            st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_noroles")
+        elif coach_choice is None:
+            st.info("Choose a coach to see the rows and enable saving.")
+            st.button("Save to data/my_team.csv", disabled=True, key="save_disabled_nocoach")
+        else:
+            sheet_names = {
+                r.Player_ID.strip(): f"{r.Surname.upper()}, {r.Name}"
+                for r in selected_df.itertuples()
+            }
+            role_csv = {"Starter": "starter", "6th Man": "6th_man", "Bench": "bench"}
+            save_rows = [
+                {
+                    "player_name": sheet_names[r.Player_ID.strip()],
+                    "role": role_csv[r.role],
+                    "captain": "Y" if r.captain else "",
                 }
-                role_csv = {"Starter": "starter", "6th Man": "6th_man", "Bench": "bench"}
-                save_rows = [
-                    {
-                        "player_name": sheet_names[r.Player_ID],
-                        "role": role_csv[r.role],
-                        "captain": "Y" if r.captain else "",
-                    }
-                    for r in squad_result.itertuples()
-                ] + [{"player_name": coach_row["coach"], "role": "coach", "captain": ""}]
+                for r in roles_df.itertuples()
+            ] + [{"player_name": coach_row["coach"], "role": "coach", "captain": ""}]
 
-                st.subheader("Preview -- exact file content that will be written")
-                st.code(render_csv(save_rows, read_header_comments()), language="text")
+            st.subheader("Preview -- exact file content that will be written")
+            st.code(render_csv(save_rows, read_header_comments()), language="text")
 
-                if st.button("Save to data/my_team.csv", type="primary"):
-                    try:
-                        written = save_my_team(save_rows)
-                        load_my_team_cached.clear()  # so the My Team view above reflects this save
-                        st.success(f"Saved 11 rows to {written}")
-                    except Exception as exc:  # show, never swallow
-                        st.error(f"Save failed, my_team.csv unchanged: {exc}")
+            if st.button("Save to data/my_team.csv", type="primary"):
+                try:
+                    written = save_my_team(save_rows)
+                    st.cache_data.clear()  # so e.g. the My Team view reflects this save next rerun
+                    st.success(f"Saved 11 rows to {written}")
+                except Exception as exc:  # show, never swallow
+                    st.error(f"Save failed, my_team.csv unchanged: {exc}")
