@@ -314,13 +314,6 @@ def load_recommendation(season, round_no):
 
 
 @st.cache_data
-def load_round_features(round_no):
-    """run_prediction_step() behind its own cache so the squad-roles section
-    (slice 6) and load_recommendation share ONE model fit per round."""
-    return run_prediction_step(get_round_gamecodes(SEASON, round_no))
-
-
-@st.cache_data
 def load_coach_table(price_path):
     """optimizer.my_team.load_coach_pool(price_path) behind a cached function,
     keyed on price_path (same reasoning as load_player_table) -- the head
@@ -1070,9 +1063,31 @@ with tab_manual:
 
     st.divider()
 
-    ROUND_OPTIONS = [30, 31, 32, 33, 34, 35, 36]
-    st.caption(f"Season {SEASON} round used for role assignment below:")
-    round_no = st.selectbox("Round", ROUND_OPTIONS, index=ROUND_OPTIONS.index(32))
+    # Same auto-detect Suggest trades uses (reused, not reimplemented), fixed to the
+    # live season -- Squad roles assigns roles for YOUR actual upcoming round, not a
+    # 2025 validation round.
+    squad_roles_auto_next_round = get_next_round_cached(LIVE_SEASON)
+    squad_roles_default_round = (
+        squad_roles_auto_next_round if squad_roles_auto_next_round is not None else 1
+    )
+    squad_roles_round_cols = st.columns([1, 2])
+    round_no = squad_roles_round_cols[0].number_input(
+        "Round",
+        min_value=1,
+        step=1,
+        value=squad_roles_default_round,
+        key="squad_roles_round_no",
+    )
+    if squad_roles_auto_next_round is None:
+        squad_roles_round_cols[1].warning(
+            f"Couldn't auto-detect the next round for Season {LIVE_SEASON} -- every "
+            "scheduled round already has box scores. Pick a round manually."
+        )
+    else:
+        squad_roles_round_cols[1].caption(
+            f"Season {LIVE_SEASON}, round {squad_roles_auto_next_round} auto-detected "
+            "(last round with box scores + 1) -- used for role assignment below."
+        )
 
     st.header("Squad roles")
 
@@ -1091,7 +1106,7 @@ with tab_manual:
         auto_squad_result, auto_error = None, None
         if not force_manual:
             try:
-                round_features_for_roles = load_round_features(round_no)
+                round_features_for_roles = load_round_features_for(LIVE_SEASON, int(round_no))
             except Exception as exc:  # e.g. "0 samples" for an early round -- show, don't crash
                 auto_error = f"Prediction step failed for round {round_no}: {exc}"
             else:
@@ -1109,7 +1124,7 @@ with tab_manual:
                 f"Roster fixed to your 10 players; the existing lineup optimizer assigns "
                 f"Starter / 6th Man / Bench + formation (risk objective, lambda={RISK_LAMBDA}). "
                 "Captain = highest predicted_score among T1 starters (post-step). Round "
-                f"{round_no}, Season {SEASON}. Nothing is saved yet."
+                f"{round_no}, Season {LIVE_SEASON}. Nothing is saved yet."
             )
             st.metric("Formation", auto_squad_result.attrs["formation"])
             role_order = {"Starter": 0, "6th Man": 1, "Bench": 2}
