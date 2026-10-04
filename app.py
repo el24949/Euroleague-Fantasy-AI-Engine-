@@ -62,6 +62,7 @@ from optimizer.my_team import (
     load_price_pool,
     resolve_coach,
     resolve_player_ids,
+    resolve_pool_placeholder_ids,
 )
 from optimizer.pick_lineup_ilp import RISK_LAMBDA, solve_lineup
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
@@ -173,12 +174,15 @@ def load_player_table(price_path):
     data/prices/players_stats.xlsx (a 2025 file) -- load_price_pool() is the
     SAME loader load_my_team()/suggest_trades() already use, so the squad
     picker now shows the identical player list/prices/positions as the rest
-    of the app. Placeholder-ID rows (Player_ID is None -- e.g. Valanciunas on
-    the 2026 sheet) are dropped: they have no usable Player_ID to pick by in
-    a dropdown, and recovering one (recover_placeholder_id) only makes sense
-    for a name actually typed into my_team.csv, not for every such row."""
+    of the app. Placeholder-ID rows (e.g. the 16 current 2026-rookie/NBA
+    signings with no real price-sheet ID) are resolved via
+    resolve_pool_placeholder_ids() -- Season 2026 boxscores first, then 2025,
+    then a synthetic 'NEW:<NAME>:<TEAM>' ID -- instead of being dropped, so
+    every player in the file is pickable with a unique Player_ID key."""
     pool = load_price_pool(price_path)
-    return pool[~pool["is_placeholder"]].reset_index(drop=True)
+    return resolve_pool_placeholder_ids(
+        pool, load_boxscore_players(LIVE_SEASON), load_boxscore_players(RECOVERY_SEASON)
+    ).reset_index(drop=True)
 
 
 @st.cache_data
@@ -515,9 +519,18 @@ with tab_my_team:
                         if in_names:
                             # resolve_player_ids is the SAME name->Player_ID resolver
                             # load_my_team() itself uses -- fails loudly on a zero/
-                            # ambiguous match rather than guessing.
+                            # ambiguous match rather than guessing. In practice these
+                            # in_names are always real (non-placeholder) IDs already --
+                            # suggest_trades._prepare_swap_pool only offers players with
+                            # a real Player_ID as swap-ins -- so the placeholder ->
+                            # Season 2026/2025/synthetic branch never actually triggers
+                            # here; both season frames are passed only to satisfy
+                            # resolve_player_ids' signature.
                             resolved_in = resolve_player_ids(
-                                in_names, price_pool_for_apply, load_boxscore_players(RECOVERY_SEASON)
+                                in_names,
+                                price_pool_for_apply,
+                                load_boxscore_players(LIVE_SEASON),
+                                load_boxscore_players(RECOVERY_SEASON),
                             )
                             new_ids = resolved_in["Player_ID"].tolist()
                         else:
@@ -793,7 +806,10 @@ with tab_manual:
 
     players_df = load_player_table(squad_price_path)
     player_names = {
-        row.Player_ID: f"{row.Surname.upper()}, {row.Name}"
+        row.Player_ID: (
+            f"{row.Surname.upper()}, {row.Name}"
+            + (" [no EuroLeague history yet]" if row.is_new else "")
+        )
         for row in players_df.itertuples()
     }
 

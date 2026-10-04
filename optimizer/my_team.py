@@ -37,18 +37,31 @@ displayed / used to disambiguate a coach name, never for coach scoring.
 (load_coach_info is still what coach_ranking.rank_coaches and
 optimizer/pick_lineup_ilp.py use -- untouched by this loader.)
 
-PLACEHOLDER-ID RECOVERY: load_prices() already splits out rows whose ID is
-the literal placeholder '-' (excluded['placeholder_id']) -- confirmed
-non-coach real players (e.g. Valanciunas in this file), just missing a
-real ID in the price sheet. recover_placeholder_id() gets them a real
-Player_ID by matching name + team against Season 2025 boxscores (the most
-recent season with real rosters -- RECOVERY_SEASON below), translating the
-price sheet's team code via PRICE_SHEET_TEAM_CODE_MAP (optimizer/
-coach_ranking.py, reused as-is -- not re-derived here). This only runs for
-a placeholder player the user actually typed into my_team.csv (not eagerly
-for the whole price file), and fails loudly -- naming the player -- if the
-team code isn't mapped, or if name+team matches zero or more than one
-Season-2025 Player_ID.
+PLACEHOLDER-ID RESOLUTION: load_prices() already splits out rows whose ID
+is the literal placeholder '-' (excluded['placeholder_id']) -- confirmed
+non-coach real players, just missing a real ID in the price sheet (as of
+round 4, 16 of them -- mostly 2026 rookies/NBA signings with no EuroLeague
+history yet). resolve_placeholder_or_synthetic() gets each a real
+Player_ID by matching name + team, Season SEASON (2026, this player's OWN
+season) first, then Season RECOVERY_SEASON (2025) if 2026 has nothing --
+translating the price sheet's team code via PRICE_SHEET_TEAM_CODE_MAP
+(optimizer/coach_ranking.py, reused as-is) for both seasons, since 2026
+boxscores already use that same translated team-code scheme (verified:
+2026's Team column values match 2025's, e.g. 'TEL'/'IST'/'RED', not the
+price sheet's own codes). If NEITHER season has ever seen this name+team,
+a synthetic ID ('NEW:<SURNAME, NAME>:<price-sheet TEAM>', uppercased) is
+assigned instead of raising -- this player genuinely has zero EuroLeague
+history, which is an expected 2026-launch state (CLAUDE.md's "~36 league
+players ... ZERO EuroLeague history"), not an error. Only a name+team match
+that is AMBIGUOUS (>1 distinct Player_ID in ONE season) still raises
+loudly, naming the player -- that case is never silently guessed. A row
+with an unmapped price-sheet team code also still raises loudly (a
+PRICE_SHEET_TEAM_CODE_MAP gap is a data/config problem, not "no history").
+_match_boxscore_ids()/resolve_placeholder_or_synthetic() are also reused
+by resolve_pool_placeholder_ids() to resolve EVERY placeholder row in a
+price pool at once (app.py's squad picker calls this so blind players are
+still pickable, just with no prediction once selected -- see
+assign_squad_roles's "No prediction available" path, unchanged).
 
 VALIDATION (validate_roster): fails loudly, matching this project's
 fail-loud style throughout, on: wrong row count, wrong role counts (must
@@ -193,13 +206,17 @@ def load_price_pool(price_path=PRICE_FILE):
     return pool
 
 
-def recover_placeholder_id(name, price_team_code, boxscore_players):
-    """Real Player_ID for a '-'-placeholder price-file row, by matching
-    name + team against RECOVERY_SEASON boxscores. Translates the price
-    sheet's team code via PRICE_SHEET_TEAM_CODE_MAP (optimizer/
-    coach_ranking.py, reused). Fails loudly, naming the player, if the
-    team code isn't mapped or if name+team matches zero or more than one
-    Player_ID."""
+def _match_boxscore_ids(name, price_team_code, boxscore_players, season):
+    """Distinct Player_IDs in boxscore_players (ONE season's worth of rows)
+    matching name + team, translating price_team_code via
+    PRICE_SHEET_TEAM_CODE_MAP (optimizer/coach_ranking.py, reused) --
+    unchanged from the old recover_placeholder_id's matching logic. Raises
+    loudly, naming the player, if the team code isn't mapped at all (a
+    PRICE_SHEET_TEAM_CODE_MAP gap -- a data/config problem, so always loud,
+    never silently resolved in any season) or if the match is AMBIGUOUS
+    (>1 distinct Player_ID for name+team in this season -- also always
+    loud). Returns [] -- never raises -- for a clean zero-match, so a
+    caller can keep looking in another season before giving up."""
     boxscores_team = PRICE_SHEET_TEAM_CODE_MAP.get(price_team_code)
     if boxscores_team is None:
         raise ValueError(
@@ -215,33 +232,50 @@ def recover_placeholder_id(name, price_team_code, boxscore_players):
         & (boxscore_players["Team"] == boxscores_team)
     ]
 
-    if len(matches) == 0:
-        raise ValueError(
-            f"{MY_TEAM_CSV}: {name!r} has placeholder ID '-' in {PRICE_FILE} and "
-            f"could NOT be recovered -- zero Season {RECOVERY_SEASON} boxscores "
-            f"players named {name!r} on team {boxscores_team!r} (mapped from "
-            f"price-sheet code {price_team_code!r}). Check spelling, or this "
-            f"player may be new to EuroLeague in 2026."
-        )
-
-    distinct_ids = matches["Player_ID"].unique()
+    distinct_ids = list(matches["Player_ID"].unique())
     if len(distinct_ids) > 1:
         raise ValueError(
             f"{MY_TEAM_CSV}: {name!r} placeholder-ID recovery is ambiguous -- "
-            f"{len(distinct_ids)} different Season {RECOVERY_SEASON} Player_IDs "
-            f"match name+team: {list(distinct_ids)}"
+            f"{len(distinct_ids)} different Season {season} Player_IDs "
+            f"match name+team: {distinct_ids}"
         )
+    return distinct_ids
 
-    return distinct_ids[0]
+
+def resolve_placeholder_or_synthetic(
+    name, price_team_code, boxscore_players_current, boxscore_players_recovery
+):
+    """(Player_ID, is_new) for a '-'-placeholder price-file row. Tries
+    Season SEASON (2026, this player's own season) first, then Season
+    RECOVERY_SEASON (2025) -- same name+team match _match_boxscore_ids()
+    has always used, just tried in two seasons in order instead of one.
+    If NEITHER season has this name+team, returns a synthetic ID
+    ('NEW:<SURNAME, NAME>:<price-sheet TEAM>', uppercased) and is_new=True
+    instead of raising -- this player genuinely has zero EuroLeague history
+    to recover a real ID from (expected for 2026 rookies/NBA signings), not
+    a data error. A match that's AMBIGUOUS in either season still raises
+    immediately (via _match_boxscore_ids) -- never silently guessed."""
+    for season, boxscore_players in (
+        (SEASON, boxscore_players_current),
+        (RECOVERY_SEASON, boxscore_players_recovery),
+    ):
+        ids = _match_boxscore_ids(name, price_team_code, boxscore_players, season)
+        if ids:
+            return ids[0], False
+    synthetic_id = f"NEW:{name.strip().upper()}:{price_team_code.strip().upper()}"
+    return synthetic_id, True
 
 
-def resolve_player_ids(names, price_pool, boxscore_players):
+def resolve_player_ids(names, price_pool, boxscore_players_current, boxscore_players_recovery):
     """Resolve each typed name against price_pool (the 2026 price file's
     player pool). A normal match returns its real Player_ID directly; a
-    match on a placeholder-ID row triggers recover_placeholder_id(). Same
-    fail-loud-on-zero-or-ambiguous contract as
-    optimizer/availability.py's load_unavailable(). Returns a DataFrame
-    (player_name as typed, Player_ID, position, price, Team)."""
+    match on a placeholder-ID row triggers resolve_placeholder_or_synthetic()
+    (Season 2026 -> Season 2025 -> synthetic ID, never a raise for a clean
+    zero-match). Zero/ambiguous NAME matches against price_pool itself
+    still raise, same fail-loud contract as optimizer/availability.py's
+    load_unavailable(). Returns a DataFrame (player_name as typed,
+    Player_ID, position, price, Team, is_new -- True only for a synthetic
+    ID; real rows, placeholder or not, are False)."""
     rows = []
     for name in names:
         name_norm = name.strip().upper()
@@ -261,11 +295,12 @@ def resolve_player_ids(names, price_pool, boxscore_players):
             )
 
         row = matches.iloc[0]
-        player_id = (
-            recover_placeholder_id(name, row["Team"], boxscore_players)
-            if row["is_placeholder"]
-            else row["Player_ID"]
-        )
+        if row["is_placeholder"]:
+            player_id, is_new = resolve_placeholder_or_synthetic(
+                name, row["Team"], boxscore_players_current, boxscore_players_recovery
+            )
+        else:
+            player_id, is_new = row["Player_ID"], False
         rows.append(
             {
                 "player_name": name,
@@ -273,10 +308,32 @@ def resolve_player_ids(names, price_pool, boxscore_players):
                 "position": row["position"],
                 "price": row["Quotation"],
                 "Team": row["Team"],
+                "is_new": is_new,
             }
         )
 
     return pd.DataFrame(rows)
+
+
+def resolve_pool_placeholder_ids(pool, boxscore_players_current, boxscore_players_recovery):
+    """load_price_pool()'s full pool with EVERY placeholder row's Player_ID
+    filled in via resolve_placeholder_or_synthetic (same Season 2026 ->
+    2025 -> synthetic order resolve_player_ids uses, just applied to every
+    placeholder row in the pool instead of only names typed into
+    my_team.csv) -- so a squad picker built on this pool can show ALL
+    players with a usable (real or synthetic), UNIQUE Player_ID to key a
+    selection widget by. Adds an is_new column (True only for a synthetic
+    ID). Returns a new DataFrame; pool itself is left untouched."""
+    pool = pool.copy()
+    pool["is_new"] = False
+    for idx in pool.index[pool["is_placeholder"]]:
+        name = f'{pool.at[idx, "Surname"].strip()}, {pool.at[idx, "Name"].strip()}'
+        player_id, is_new = resolve_placeholder_or_synthetic(
+            name, pool.at[idx, "Team"], boxscore_players_current, boxscore_players_recovery
+        )
+        pool.at[idx, "Player_ID"] = player_id
+        pool.at[idx, "is_new"] = is_new
+    return pool
 
 
 def load_coach_pool(price_path=PRICE_FILE):
@@ -367,12 +424,17 @@ def load_my_team(
     csv_path=MY_TEAM_CSV,
     state_path=MY_TEAM_STATE_CSV,
     price_path=PRICE_FILE,
+    season=SEASON,
     recovery_season=RECOVERY_SEASON,
     db_path=DB_PATH,
 ):
     """The reusable entry point: load, resolve, and validate the current
     team. Returns {'players': DataFrame, 'coach': dict, 'state': dict,
-    'season': SEASON, 'price_round': PRICE_ROUND}."""
+    'season': SEASON, 'price_round': PRICE_ROUND}. A placeholder-ID player
+    typed into my_team.csv resolves to a real ID (Season `season` tried
+    first, then `recovery_season`) or, with zero history in either, a
+    synthetic ID (see resolve_placeholder_or_synthetic) -- never a raise
+    for that reason alone."""
     roster_raw = load_roster_csv(csv_path)
 
     coach_rows = roster_raw[roster_raw["role"] == "coach"]
@@ -381,8 +443,14 @@ def load_my_team(
     players_raw = roster_raw[roster_raw["role"] != "coach"].copy()
 
     price_pool = load_price_pool(price_path)
-    boxscore_players = load_boxscore_players(recovery_season, db_path)
-    resolved = resolve_player_ids(players_raw["player_name"].tolist(), price_pool, boxscore_players)
+    boxscore_players_current = load_boxscore_players(season, db_path)
+    boxscore_players_recovery = load_boxscore_players(recovery_season, db_path)
+    resolved = resolve_player_ids(
+        players_raw["player_name"].tolist(),
+        price_pool,
+        boxscore_players_current,
+        boxscore_players_recovery,
+    )
 
     players = players_raw.merge(resolved, on="player_name", how="left")
 
