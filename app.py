@@ -236,17 +236,17 @@ def assign_squad_roles(round_features, selected_df):
 
 
 @st.cache_data
-def load_recommendation(round_no):
+def load_recommendation(season, round_no):
     """Step 6's inputs, built exactly as update_round.py's __main__ does, then
-    get_recommended_team()'s plain dict. Cached per round_no argument -- Streamlit
-    reruns this script top-to-bottom on every widget interaction, so round_no MUST
-    arrive as a function argument (not read from st.session_state inside this
-    function) for @st.cache_data to key its cache on it and skip recompute when
-    the user switches back to an already-seen round."""
-    target_gamecodes = get_round_gamecodes(SEASON, round_no)
-    prices_df, _coverage = load_prices_for_round(round_no, season=SEASON)
-    round_features = load_round_features(round_no)
-    return get_recommended_team(round_features, target_gamecodes, prices_df, season=SEASON)
+    get_recommended_team()'s plain dict. Cached per (season, round_no) --
+    Streamlit reruns this script top-to-bottom on every widget interaction, so
+    both MUST arrive as function arguments (not read from st.session_state
+    inside this function) for @st.cache_data to key its cache on them and skip
+    recompute when the user switches back to an already-seen season/round."""
+    target_gamecodes = get_round_gamecodes(season, round_no)
+    prices_df, _coverage = load_prices_for_round(round_no, season=season)
+    round_features = load_round_features_for(season, round_no)
+    return get_recommended_team(round_features, target_gamecodes, prices_df, season=season)
 
 
 @st.cache_data
@@ -649,75 +649,105 @@ with tab_manual:
 
     st.divider()
 
-    ROUND_OPTIONS = [30, 31, 32, 33, 34, 35, 36]
+    with st.expander("Recommended team (from scratch)", expanded=False):
+        st.caption(
+            "Ideal team built from scratch for the selected round. For changes to "
+            "YOUR team, use Suggest trades."
+        )
 
-    st.caption(
-        "This displays a 2025 VALIDATION team, not a live 2026 pick -- 2026 box scores "
-        "are still empty this early in the season, so the engine has no game logs to "
-        "predict from yet. This screen is plumbing/proof that the pipeline renders "
-        "correctly, not a recommendation to act on."
-    )
+        rec_cols = st.columns([1, 1, 2])
+        rec_season = rec_cols[0].selectbox(
+            "Season",
+            options=[2026, 2025],
+            index=0,
+            key="rec_team_season",
+        )
 
-    st.caption("Season: 2025")
-    round_no = st.selectbox("Round", ROUND_OPTIONS, index=ROUND_OPTIONS.index(32))
+        rec_auto_next_round = get_next_round_cached(rec_season)
+        rec_default_round = rec_auto_next_round if rec_auto_next_round is not None else 1
+        rec_round_no = rec_cols[1].number_input(
+            "Round",
+            min_value=1,
+            step=1,
+            value=rec_default_round,
+            key="rec_team_round_no",
+        )
+        if rec_auto_next_round is None:
+            rec_cols[2].warning(
+                f"Couldn't auto-detect the next round for Season {rec_season} -- "
+                "pick a round manually."
+            )
+        else:
+            rec_cols[2].caption(
+                f"Auto-detected next round: {rec_auto_next_round} (last round with box scores + 1)."
+            )
 
-    team = load_recommendation(round_no)
+        try:
+            team = load_recommendation(rec_season, int(rec_round_no))
+        except Exception as exc:
+            if "sample" in str(exc).lower():
+                st.info(
+                    f"Not enough game history yet for round {int(rec_round_no)} -- "
+                    "predictions become available after a few rounds."
+                )
+            else:
+                st.error(f"Couldn't build a recommended team for round {int(rec_round_no)}: {exc}")
+        else:
+            st.title("Recommended Team")
 
-    st.title("Recommended Team")
+            header_cols = st.columns(4)
+            header_cols[0].metric("Formation", team["formation"])
+            header_cols[1].metric("Solver status", team["solver_status"])
+            header_cols[2].metric("Captain multiplier", f"x{team['captain_multiplier']}")
+            header_cols[3].metric(
+                "Total squad cost",
+                f"{team['total_squad_cost']:.1f} / {team['budget']}",
+            )
 
-    header_cols = st.columns(4)
-    header_cols[0].metric("Formation", team["formation"])
-    header_cols[1].metric("Solver status", team["solver_status"])
-    header_cols[2].metric("Captain multiplier", f"x{team['captain_multiplier']}")
-    header_cols[3].metric(
-        "Total squad cost",
-        f"{team['total_squad_cost']:.1f} / {team['budget']}",
-    )
+            coach = team["chosen_coach"]
+            budget_cols = st.columns(3)
+            budget_cols[0].metric(
+                "Chosen coach",
+                f"{coach['name']} ({coach['team']})",
+                help=f"Price {coach['price']:.1f}",
+            )
+            budget_cols[1].metric("Player budget", f"{team['player_budget']:.1f}")
+            budget_cols[2].metric("Season", team["season_resolved"])
 
-    coach = team["chosen_coach"]
-    budget_cols = st.columns(3)
-    budget_cols[0].metric(
-        "Chosen coach",
-        f"{coach['name']} ({coach['team']})",
-        help=f"Price {coach['price']:.1f}",
-    )
-    budget_cols[1].metric("Player budget", f"{team['player_budget']:.1f}")
-    budget_cols[2].metric("Season", team["season_resolved"])
+            st.subheader("Full 11-slot team")
+            full_team_columns = [
+                "Player",
+                "role",
+                "position",
+                "turn",
+                "price",
+                "predicted_score",
+                "consistency_5",
+                "objective_score",
+            ]
+            st.dataframe(
+                [{col: row[col] for col in full_team_columns} for row in team["full_team"]],
+                width="stretch",
+            )
 
-    st.subheader("Full 11-slot team")
-    full_team_columns = [
-        "Player",
-        "role",
-        "position",
-        "turn",
-        "price",
-        "predicted_score",
-        "consistency_5",
-        "objective_score",
-    ]
-    st.dataframe(
-        [{col: row[col] for col in full_team_columns} for row in team["full_team"]],
-        width="stretch",
-    )
+            st.subheader("Coach shortlist")
+            st.dataframe(team["coach_shortlist"], width="stretch")
 
-    st.subheader("Coach shortlist")
-    st.dataframe(team["coach_shortlist"], width="stretch")
+            st.subheader("Turn coverage by position")
+            st.dataframe(team["turn_coverage_by_position"], width="stretch")
 
-    st.subheader("Turn coverage by position")
-    st.dataframe(team["turn_coverage_by_position"], width="stretch")
-
-    st.subheader("Players the engine is blind to")
-    st.caption(
-        "Excluded before the optimizer ever saw them -- manual availability overrides "
-        "and candidates with no matching price this round, not engine picks."
-    )
-    excluded_cols = st.columns(2)
-    excluded_unavailable = team["excluded_unavailable"]
-    excluded_no_price = team["excluded_no_price"]
-    excluded_cols[0].markdown(f"**Unavailable (manual override): {excluded_unavailable['count']}**")
-    excluded_cols[0].write(excluded_unavailable["names"] or "None")
-    excluded_cols[1].markdown(f"**No matching price this round: {excluded_no_price['count']}**")
-    excluded_cols[1].write(excluded_no_price["names"] or "None")
+            st.subheader("Players the engine is blind to")
+            st.caption(
+                "Excluded before the optimizer ever saw them -- manual availability overrides "
+                "and candidates with no matching price this round, not engine picks."
+            )
+            excluded_cols = st.columns(2)
+            excluded_unavailable = team["excluded_unavailable"]
+            excluded_no_price = team["excluded_no_price"]
+            excluded_cols[0].markdown(f"**Unavailable (manual override): {excluded_unavailable['count']}**")
+            excluded_cols[0].write(excluded_unavailable["names"] or "None")
+            excluded_cols[1].markdown(f"**No matching price this round: {excluded_no_price['count']}**")
+            excluded_cols[1].write(excluded_no_price["names"] or "None")
 
     st.divider()
     st.header("My Squad (display-only preview)")
@@ -821,6 +851,11 @@ with tab_manual:
         st.error("Not a legal squad -- " + "; ".join(failures))
 
     st.divider()
+
+    ROUND_OPTIONS = [30, 31, 32, 33, 34, 35, 36]
+    st.caption(f"Season {SEASON} round used for role assignment below:")
+    round_no = st.selectbox("Round", ROUND_OPTIONS, index=ROUND_OPTIONS.index(32))
+
     st.header("Squad roles (display-only)")
     st.caption(
         f"Roster fixed to your 10 players; the existing lineup optimizer assigns "
