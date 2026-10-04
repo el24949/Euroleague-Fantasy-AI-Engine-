@@ -48,6 +48,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from data_collection.fetch_season import collect_season
 from data_collection.latest_prices import find_latest_price_file
 from data_collection.load_prices_history import load_prices_for_round
 from features.turn_tags import build_turn_lookup
@@ -125,6 +126,15 @@ def get_next_round_cached(season):
     stats and its own prints (to the server console, not this page) aren't
     needed."""
     return status_summary(season)["next_round"]
+
+
+@st.cache_data
+def get_latest_complete_round_cached(season):
+    """status_summary()'s latest_complete_round (the latest round where
+    EVERY scheduled game is already in boxscores) -- same cached-wrapper
+    pattern as get_next_round_cached, just reading a different field of
+    the same summary dict."""
+    return status_summary(season)["latest_complete_round"]
 
 
 def render_role_table(players, role):
@@ -714,6 +724,40 @@ with tab_manual:
             del st.session_state["price_upload_pending"]
         if confirm_cols[1].button("Cancel", key="cancel_price_overwrite"):
             del st.session_state["price_upload_pending"]
+
+    st.divider()
+
+    # ---- Update game data: collect_season() from the browser, no terminal ----
+    st.header("Update game data")
+    st.caption(
+        "Fetches any new Season 2026 box scores from euroleague-api and stores them "
+        "-- the same collector `python -m pipeline.update_round` runs, triggered from "
+        "here instead of the terminal."
+    )
+    latest_complete_round = get_latest_complete_round_cached(LIVE_SEASON)
+    if latest_complete_round is not None:
+        st.caption(f"Game data up to round {latest_complete_round}.")
+    else:
+        st.caption("No complete Season 2026 round in the database yet.")
+
+    if st.button("Update game data (2026)"):
+        with st.spinner("Fetching new games..."):
+            try:
+                fetch_summary = collect_season(LIVE_SEASON)
+            except Exception as exc:  # e.g. the API/network is unreachable -- show, never crash
+                st.error(f"Couldn't fetch game data: {exc}")
+            else:
+                st.cache_data.clear()  # so predictions/roster views see the new games
+                st.success(
+                    f"Saved {fetch_summary['games_saved']} new game(s), "
+                    f"{fetch_summary['rows_saved']} row(s)."
+                )
+                skipped = fetch_summary["skipped_gamecodes"]
+                if skipped:
+                    st.caption(
+                        f"Skipped {len(skipped)} game(s) (not played / not available yet): "
+                        f"{skipped}"
+                    )
 
     st.divider()
 
