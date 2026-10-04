@@ -52,7 +52,7 @@ ILP FORMULATION (PuLP/CBC, same pattern as optimizer/pick_team_ilp.py):
 
 import pulp
 
-from optimizer.my_team import load_my_team, load_price_pool
+from optimizer.my_team import PRICE_FILE, load_my_team, load_price_pool
 from optimizer.pick_lineup_ilp import RISK_LAMBDA
 from optimizer.pick_team import POSITION_REQUIREMENTS
 from optimizer.pick_team_ilp import BUDGET, MAX_PER_CLUB
@@ -83,11 +83,17 @@ def _prepare_swap_pool(price_pool, exclude_ids):
     return pool[~pool["Player_ID"].isin(exclude_ids)]
 
 
-def suggest_trades(current_team, max_trades, season, round_no, budget=BUDGET):
+def suggest_trades(current_team, max_trades, season, round_no, budget=BUDGET, price_path=PRICE_FILE):
     """Best up to-max_trades one-for-one player swaps for current_team
     (load_my_team()'s return: 'players' DataFrame + 'coach' dict + 'state').
     Coach is never changed -- see module docstring. Returns a plain dict,
-    see the module docstring's ILP section for how it's built."""
+    see the module docstring's ILP section for how it's built.
+
+    price_path defaults to optimizer.my_team.PRICE_FILE (this module's own
+    prior behavior, calling load_price_pool() with no argument) -- pass the
+    caller's own runtime-resolved price file (e.g. app.py's
+    current_price_path()) so swap candidates come from the SAME price
+    snapshot current_team's own prices/positions were resolved against."""
     players = current_team["players"].copy()
     players["Player_ID"] = players["Player_ID"].str.strip()
     coach = current_team["coach"]
@@ -98,7 +104,7 @@ def suggest_trades(current_team, max_trades, season, round_no, budget=BUDGET):
     rated_current = players.merge(rated, on="Player_ID", how="inner")
     blind_current = players[~players["Player_ID"].isin(rated_current["Player_ID"])]
 
-    price_pool = load_price_pool()
+    price_pool = load_price_pool(price_path)
     swap_pool = _prepare_swap_pool(price_pool, players["Player_ID"])
     swap_candidates = swap_pool.merge(rated, on="Player_ID", how="inner")
     swap_candidates = swap_candidates.drop_duplicates(subset="Player_ID")

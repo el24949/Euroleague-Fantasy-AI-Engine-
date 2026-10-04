@@ -101,14 +101,18 @@ ROLE_ORDER = ["starter", "6th_man", "bench"]
 
 
 @st.cache_data
-def load_my_team_cached():
-    """load_my_team() (optimizer/my_team.py) behind a cached function, same
-    pattern as load_player_table/load_coach_table -- it parses the price
-    Excel sheet and queries the DB, so it shouldn't rerun on every widget
-    interaction. Cleared explicitly after a successful save (see the Save
-    section below) so this view reflects the roster just written, not a
-    stale cached read of the file from before the save."""
-    return load_my_team()
+def load_my_team_cached(price_path):
+    """load_my_team(price_path=price_path) (optimizer/my_team.py) behind a
+    cached function, same pattern as load_player_table/load_coach_table --
+    it parses the price Excel sheet and queries the DB, so it shouldn't
+    rerun on every widget interaction. price_path is an ARGUMENT (not the
+    module-level PRICE_FILE constant) so a newly uploaded file gets its own
+    cache entry instead of replaying a stale one -- same reasoning as
+    load_player_table/load_coach_table. Cleared explicitly after a
+    successful save (see the Save section below) so this view reflects the
+    roster just written, not a stale cached read of the file from before
+    the save."""
+    return load_my_team(price_path=price_path)
 
 
 @st.cache_data
@@ -148,20 +152,29 @@ REQUIRED_POSITION_COUNTS = {"G": 4, "F": 4, "C": 2}
 FALLBACK_PRICE_FILE = "data/prices/round_01/players_stats.xlsx"
 
 
-def current_price_path():
-    """The latest uploaded price file (data/prices/uploads), resolved at
-    RUNTIME on every call -- NOT optimizer.my_team.PRICE_FILE, which is a
-    constant fixed once when that module is first imported (server startup)
-    and would keep pointing at a stale file for the rest of the server's
-    life, missing anything uploaded while the app is already running. Same
-    not-found fallback optimizer.my_team.PRICE_FILE uses, so an empty
-    uploads folder still doesn't crash the app. Cheap (a directory listing),
-    so it's called plainly, not behind @st.cache_data."""
+def current_price_info():
+    """(price_path, round_no) for the latest uploaded price file
+    (data/prices/uploads), resolved at RUNTIME on every call -- NOT
+    optimizer.my_team.PRICE_FILE, which is a constant fixed once when that
+    module is first imported (server startup) and would keep pointing at a
+    stale file for the rest of the server's life, missing anything uploaded
+    while the app is already running. Same not-found fallback
+    optimizer.my_team.PRICE_FILE uses (round_no is then None -- the
+    fallback file's round isn't derived from its filename), so an empty
+    uploads folder still doesn't crash the app. Cheap (a directory
+    listing), so it's called plainly, not behind @st.cache_data. Used by
+    every price-aware section of the app (My Team, Suggest/Apply trades,
+    the Manual tab's squad/coach pickers) so they all read the SAME file."""
     try:
-        path, _round_no = find_latest_price_file()
-        return str(path)
+        path, round_no = find_latest_price_file()
+        return str(path), round_no
     except ValueError:
-        return FALLBACK_PRICE_FILE
+        return FALLBACK_PRICE_FILE, None
+
+
+def current_price_path():
+    """current_price_info()'s path only -- see its docstring."""
+    return current_price_info()[0]
 
 
 @st.cache_data
@@ -302,13 +315,19 @@ tab_my_team, tab_manual = st.tabs(["My Team", "Manual"])
 # The two things checked every round; kept compact on purpose.
 # =====================================================================
 with tab_my_team:
+    tab_price_path, tab_price_round = current_price_info()
+    if tab_price_round is not None:
+        st.caption(f"Prices: round {tab_price_round} ({Path(tab_price_path).name})")
+    else:
+        st.caption(f"Prices: {tab_price_path} (no uploads found -- fallback file)")
+
     left_col, right_col = st.columns(2)
 
     # ---- LEFT: current roster, compact ----
     with left_col:
         st.subheader("My Team")
         try:
-            my_team = load_my_team_cached()
+            my_team = load_my_team_cached(tab_price_path)
         except ValueError as exc:
             st.error(f"Couldn't load data/my_team.csv: {exc}")
         else:
@@ -387,7 +406,7 @@ with tab_my_team:
 
         if st.button("Suggest trades", type="primary"):
             try:
-                my_team_for_trades = load_my_team_cached()
+                my_team_for_trades = load_my_team_cached(tab_price_path)
             except ValueError as exc:
                 st.error(f"Couldn't load data/my_team.csv: {exc}")
             else:
@@ -399,6 +418,7 @@ with tab_my_team:
                         season=trade_season,
                         round_no=int(target_round),
                         budget=BUDGET,
+                        price_path=tab_price_path,
                     )
                 except Exception as exc:  # e.g. no scheduled games, or no prior-history
                     # data yet for this round -- show it, never crash the page.
@@ -495,16 +515,17 @@ with tab_my_team:
             else:
                 if st.button("Apply these trades", key="apply_trades_button"):
                     try:
-                        current_for_apply = load_my_team_cached()
+                        current_for_apply = load_my_team_cached(tab_price_path)
                         trade_ctx = st.session_state["trade_context"]
-                        # load_price_pool() (the live PRICE_FILE) -- NOT load_player_table()
-                        # (load_prices() with no path, which defaults to the older generic
-                        # data/prices/players_stats.xlsx). suggest_trades.py's own position
-                        # constraint was solved against load_price_pool(); rebuilding the
-                        # squad from a DIFFERENT price file risks a player having a
-                        # different Position/Team there than what the optimizer actually
-                        # used, breaking the 4G/4F/2C shape it already guaranteed.
-                        price_pool_for_apply = load_price_pool()
+                        # load_price_pool(tab_price_path) -- the SAME runtime-latest file
+                        # suggest_trades() above was just called with -- NOT
+                        # load_player_table() (whose cache key is the squad picker's own
+                        # price_path, which could -- in theory -- differ if resolved in a
+                        # different rerun). Rebuilding the squad from a DIFFERENT price
+                        # file risks a player having a different Position/Team there than
+                        # what the optimizer actually used, breaking the 4G/4F/2C shape it
+                        # already guaranteed.
+                        price_pool_for_apply = load_price_pool(tab_price_path)
                         usable_pool_for_apply = price_pool_for_apply[
                             ~price_pool_for_apply["is_placeholder"]
                         ]
@@ -547,7 +568,9 @@ with tab_my_team:
                             )
 
                         if coach_change["changed"]:
-                            coach_match = resolve_coach(coach_change["to"], load_coach_pool())
+                            coach_match = resolve_coach(
+                                coach_change["to"], load_coach_pool(tab_price_path)
+                            )
                             new_coach = {
                                 "name": coach_match["coach"],
                                 "team_code": coach_match["team_code"],
