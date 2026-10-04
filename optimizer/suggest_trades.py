@@ -170,7 +170,10 @@ def suggest_trades(current_team, max_trades, season, round_no, budget=BUDGET, pr
             + pulp.lpSum(keep_vars[pid] * rated_current_by_id.loc[pid, "price"] for pid in keep_vars)
             + pulp.lpSum(add_vars[pid] * swap_candidates_by_id.loc[pid, "price"] for pid in add_vars)
             + float(coach["price"])
-            <= budget
+            # +1e-6: prices have one decimal, so a squad costing EXACTLY budget can sum
+            # to e.g. 104.10000000000001 in float arithmetic -- without this tolerance
+            # CBC would reject an exact-budget squad as infeasible.
+            <= budget + 1e-6
         )
 
         # max_trades is an UPPER BOUND, never a required count -- keeping a

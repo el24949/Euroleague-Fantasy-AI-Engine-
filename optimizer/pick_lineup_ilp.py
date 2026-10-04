@@ -222,7 +222,12 @@ def solve_lineup(
 
     prob += (
         pulp.lpSum(player_vars[idx] * df_round.loc[idx, "price"] for idx in df_round.index)
-        <= budget
+        # +1e-6: prices have one decimal, so a roster costing EXACTLY budget can sum to
+        # e.g. 104.10000000000001 in float arithmetic -- without this tolerance CBC
+        # would reject an exact-budget roster as infeasible (this is what gated the
+        # Manual tab's Save button on a false "Infeasible" via assign_squad_roles --
+        # see app.py).
+        <= budget + 1e-6
     )
 
     for club in df_round["Team"].unique():

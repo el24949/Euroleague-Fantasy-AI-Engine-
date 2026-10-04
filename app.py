@@ -52,14 +52,21 @@ from data_collection.fetch_season import collect_season
 from data_collection.latest_prices import find_latest_price_file
 from data_collection.load_prices_history import load_prices_for_round
 from features.turn_tags import build_turn_lookup
-from my_team_writer import read_header_comments, render_csv, save_my_team
+from my_team_writer import (
+    read_header_comments,
+    render_csv,
+    save_my_team,
+    save_my_team_state,
+)
 from optimizer.my_team import (
+    MY_TEAM_STATE_CSV,
     POSITION_NAME_TO_CODE,
     RECOVERY_SEASON,
     SEASON as LIVE_SEASON,
     load_boxscore_players,
     load_coach_pool,
     load_my_team,
+    load_my_team_state,
     load_price_pool,
     resolve_coach,
     resolve_player_ids,
@@ -151,7 +158,7 @@ def render_role_table(players, role):
                 lambda v: " (C)" if v == "Y" else ""
             ),
             "Position": group["position"],
-            "Price": group["price"],
+            "Price": group["price"].round(1),
         }
     )
     st.dataframe(display, width="stretch", hide_index=True)
@@ -219,9 +226,15 @@ def load_round_features_for(season, round_no):
     return run_prediction_step(get_round_gamecodes(season, round_no))
 
 
-def assign_squad_roles(round_features, selected_df):
+def assign_squad_roles(round_features, selected_df, budget=BUDGET):
     """Slice 6: run the existing solve_lineup() with the roster FIXED to the
     selected squad. Returns (result_df, error_message); exactly one is None.
+
+    budget defaults to optimizer.pick_team_ilp.BUDGET (100, this function's
+    own prior behavior) -- callers pass the user's own total_budget (My
+    Team tab's editable total_budget, loaded from data/my_team_state.csv)
+    so a FIXED roster that's legal under total_budget never gets rejected
+    here as "Infeasible" for exceeding the old fixed 100 instead.
 
     The candidate pool is restricted to the selected Player_IDs AND those rows
     are forced onto the roster (fixed_roster_idx), so only roles + formation are
@@ -266,7 +279,7 @@ def assign_squad_roles(round_features, selected_df):
         pool,
         "objective_score",
         1.0,  # captain handled below as a post-step, not by the ILP
-        budget=BUDGET,
+        budget=budget,
         fixed_roster_idx=pool.index,
     )
     if result["status"] != "Optimal":
@@ -344,14 +357,48 @@ with tab_my_team:
             my_players = my_team["players"]
             my_coach = my_team["coach"]
             my_state = my_team["state"]
+            my_total_budget = my_state["total_budget"]
             squad_cost = float(my_players["price"].sum()) + float(my_coach["price"])
+            credits_left = my_total_budget - squad_cost
 
             metric_cols = st.columns(3)
-            metric_cols[0].metric("Credits left", f"{my_state['remaining_budget']:.1f}")
+            metric_cols[0].metric("Credits left", f"{credits_left:.1f}")
             metric_cols[1].metric("Trades used", my_state["trades_used"])
-            metric_cols[2].metric("Squad cost", f"{squad_cost:.1f} / 100")
-            if squad_cost > 100:
+            metric_cols[2].metric("Squad cost", f"{squad_cost:.1f} / {my_total_budget:.1f}")
+            # round(): prices have one decimal, so a squad costing EXACTLY total_budget
+            # can sum to e.g. 104.10000000000001 in float arithmetic -- comparing the
+            # rounded values (not the raw floats) avoids flagging it "Over budget".
+            if round(squad_cost, 1) > round(my_total_budget, 1):
                 metric_cols[2].markdown(":red[Over budget]")
+
+            # total_budget isn't fixed -- it's team value + bank, exactly as the
+            # real game shows it, and changes every round. Edited here (not a
+            # fixed 100) and saved straight to data/my_team_state.csv.
+            budget_cols = st.columns([1, 1, 1])
+            edited_total_budget = budget_cols[0].number_input(
+                "Total budget",
+                min_value=0.0,
+                step=0.1,
+                format="%.1f",
+                value=float(my_total_budget),
+                key="edit_total_budget",
+            )
+            edited_trades_used = budget_cols[1].number_input(
+                "Trades used",
+                min_value=0,
+                step=1,
+                value=int(my_state["trades_used"]),
+                key="edit_trades_used",
+            )
+            if budget_cols[2].button("Save", key="save_team_state"):
+                try:
+                    written_state = save_my_team_state(
+                        edited_total_budget, int(edited_trades_used)
+                    )
+                    st.cache_data.clear()
+                    st.success(f"Saved to {written_state}")
+                except Exception as exc:  # show, never swallow
+                    st.error(f"Couldn't save {MY_TEAM_STATE_CSV}: {exc}")
 
             for role in ROLE_ORDER:
                 render_role_table(my_players, role)
@@ -421,13 +468,14 @@ with tab_my_team:
                 st.error(f"Couldn't load data/my_team.csv: {exc}")
             else:
                 max_trades = None if unlimited_trades else int(max_trades_input)
+                trade_budget = my_team_for_trades["state"]["total_budget"]
                 try:
                     trade_result = suggest_trades(
                         my_team_for_trades,
                         max_trades,
                         season=trade_season,
                         round_no=int(target_round),
-                        budget=BUDGET,
+                        budget=trade_budget,
                         price_path=tab_price_path,
                     )
                 except Exception as exc:  # e.g. no scheduled games, or no prior-history
@@ -443,6 +491,7 @@ with tab_my_team:
                     st.session_state["trade_context"] = {
                         "season": trade_season,
                         "round_no": int(target_round),
+                        "budget": trade_budget,
                     }
                     st.session_state.pop("apply_trades_pending", None)  # stale preview
 
@@ -473,12 +522,17 @@ with tab_my_team:
                 if trade_result["max_trades"] is None
                 else f"{trade_result['trades_used']} / {trade_result['max_trades']}"
             )
+            # The SAME total_budget this trade_result was computed against (stashed in
+            # trade_context alongside season/round_no) -- NOT the fixed BUDGET constant,
+            # and not a re-read of the (possibly since-edited) My Team budget input.
+            display_budget = (st.session_state.get("trade_context") or {}).get("budget", BUDGET)
             cost_cols = st.columns(2)
             cost_cols[0].metric("Trades used", trades_label)
             cost_cols[1].metric(
-                "Resulting total cost", f"{trade_result['resulting_total_cost']:.1f} / {BUDGET}"
+                "Resulting total cost", f"{trade_result['resulting_total_cost']:.1f} / {display_budget:.1f}"
             )
-            if trade_result["resulting_total_cost"] > BUDGET:
+            # round(): see the My Team "Over budget" check above -- same float-sum issue.
+            if round(trade_result["resulting_total_cost"], 1) > round(display_budget, 1):
                 cost_cols[1].markdown(":red[Over budget]")
 
             if trade_result["swaps"]:
@@ -495,7 +549,9 @@ with tab_my_team:
                     }
                 )[["Out", "Out pos", "Out price", "In", "In pos", "In price", "Gain"]]
                 st.dataframe(
-                    swap_table.style.map(
+                    swap_table.style.format(
+                        {"Out price": "{:.1f}", "In price": "{:.1f}", "Gain": "{:+.2f}"}
+                    ).map(
                         lambda v: f"color: {'green' if v >= 0 else 'red'}", subset=["Gain"]
                     ),
                     width="stretch",
@@ -593,7 +649,9 @@ with tab_my_team:
                             trade_ctx["season"], trade_ctx["round_no"]
                         )
                         new_squad_result, new_squad_error = assign_squad_roles(
-                            round_features_for_apply, new_squad_df
+                            round_features_for_apply,
+                            new_squad_df,
+                            budget=current_for_apply["state"]["total_budget"],
                         )
                     except Exception as exc:
                         st.error(f"Couldn't apply trades: {exc}")
@@ -650,6 +708,20 @@ with tab_my_team:
 # manual squad-builder/save tools. Reached for far less often than Tab 1.
 # =====================================================================
 with tab_manual:
+    # total_budget isn't fixed -- it's team value + bank, exactly as the real game
+    # shows it (My Team tab's editable field, data/my_team_state.csv). Read fresh
+    # here (not cached -- a plain CSV read, and this tab doesn't hold the My Team
+    # tab's own my_team dict) so the legality check and role assignment below use
+    # the SAME number the My Team tab displays, not the old fixed 100.
+    try:
+        manual_total_budget = load_my_team_state()["total_budget"]
+    except Exception:
+        manual_total_budget = BUDGET
+        st.caption(
+            f"Couldn't read total_budget from data/my_team_state.csv -- using the "
+            f"default {BUDGET:.1f}."
+        )
+
     # ---- Upload round prices ----
     # Saves the uploaded file under the exact name pattern
     # data_collection.latest_prices.find_latest_price_file expects
@@ -766,6 +838,10 @@ with tab_manual:
             "Ideal team built from scratch for the selected round. For changes to "
             "YOUR team, use Suggest trades."
         )
+        st.caption(
+            f"Still uses a fixed {BUDGET:.1f}-credit budget, not your My Team tab's "
+            "total_budget -- not updated yet."
+        )
 
         rec_cols = st.columns([1, 1, 2])
         rec_season = rec_cols[0].selectbox(
@@ -813,7 +889,7 @@ with tab_manual:
             header_cols[2].metric("Captain multiplier", f"x{team['captain_multiplier']}")
             header_cols[3].metric(
                 "Total squad cost",
-                f"{team['total_squad_cost']:.1f} / {team['budget']}",
+                f"{team['total_squad_cost']:.1f} / {team['budget']:.1f}",
             )
 
             coach = team["chosen_coach"]
@@ -838,12 +914,27 @@ with tab_manual:
                 "objective_score",
             ]
             st.dataframe(
-                [{col: row[col] for col in full_team_columns} for row in team["full_team"]],
+                [
+                    {
+                        col: (round(row[col], 1) if col == "price" else row[col])
+                        for col in full_team_columns
+                    }
+                    for row in team["full_team"]
+                ],
                 width="stretch",
             )
 
             st.subheader("Coach shortlist")
-            st.dataframe(team["coach_shortlist"], width="stretch")
+            st.dataframe(
+                [
+                    {
+                        col: (round(val, 1) if col == "coach_price" else val)
+                        for col, val in row.items()
+                    }
+                    for row in team["coach_shortlist"]
+                ],
+                width="stretch",
+            )
 
             st.subheader("Turn coverage by position")
             st.dataframe(team["turn_coverage_by_position"], width="stretch")
@@ -956,12 +1047,21 @@ with tab_manual:
     players_cost = float(selected_df["Quotation"].sum())
     coach_cost = float(coach_row["coach_price"]) if coach_row is not None else 0.0
     total_cost = players_cost + coach_cost
-    breakdown = f"Cost: {players_cost:.1f} players + {coach_cost:.1f} coach = {total_cost:.1f}/{BUDGET}"
-    if total_cost <= BUDGET:
+    breakdown = (
+        f"Cost: {players_cost:.1f} players + {coach_cost:.1f} coach = "
+        f"{total_cost:.1f}/{manual_total_budget:.1f}"
+    )
+    # round(): prices have one decimal, so a squad costing EXACTLY manual_total_budget
+    # can sum to e.g. 104.10000000000001 in float arithmetic -- comparing the rounded
+    # values (not the raw floats) avoids flagging an exact-budget squad as illegal.
+    if round(total_cost, 1) <= round(manual_total_budget, 1):
         st.write(f"{breakdown} OK")
     else:
         st.write(f"{breakdown} - over budget")
-        failures.append(f"Cost {players_cost:.1f} players + {coach_cost:.1f} coach = {total_cost:.1f}/{BUDGET}")
+        failures.append(
+            f"Cost {players_cost:.1f} players + {coach_cost:.1f} coach = "
+            f"{total_cost:.1f}/{manual_total_budget:.1f}"
+        )
 
     if not failures:
         st.success("Legal squad")
@@ -996,7 +1096,7 @@ with tab_manual:
                 auto_error = f"Prediction step failed for round {round_no}: {exc}"
             else:
                 auto_squad_result, auto_error = assign_squad_roles(
-                    round_features_for_roles, selected_df
+                    round_features_for_roles, selected_df, budget=manual_total_budget
                 )
 
         manual_mode = force_manual or auto_squad_result is None

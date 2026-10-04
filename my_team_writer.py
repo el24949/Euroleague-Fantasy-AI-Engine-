@@ -15,7 +15,11 @@ optimizer.my_team.load_roster_csv with comment='#'):
 SAFETY: the first save copies the existing file to my_team.csv.bak (never
 overwriting an existing .bak); the write goes to a temp file in the same
 directory, is fsynced, then os.replace()d onto the real file, so a crash
-mid-write can never leave a truncated my_team.csv.
+mid-write can never leave a truncated my_team.csv. _atomic_write() is this
+backup/tempfile/fsync/os.replace sequence factored out so save_my_team()
+and save_my_team_state() (the user-editable total_budget/trades_used in
+data/my_team_state.csv -- app.py's My Team tab) share one write path
+instead of two copies of the same crash-safety logic.
 """
 
 import csv
@@ -26,7 +30,9 @@ import tempfile
 from pathlib import Path
 
 MY_TEAM_PATH = Path(__file__).resolve().parent / "data" / "my_team.csv"
+MY_TEAM_STATE_PATH = Path(__file__).resolve().parent / "data" / "my_team_state.csv"
 HEADER = ["player_name", "role", "captain"]
+STATE_HEADER = ["field", "value"]
 ROLE_COUNTS = {"starter": 5, "6th_man": 1, "bench": 4, "coach": 1}
 ROLE_ORDER = {"starter": 0, "6th_man": 1, "bench": 2, "coach": 3}
 
@@ -71,12 +77,11 @@ def read_header_comments(path=MY_TEAM_PATH):
     return lines
 
 
-def save_my_team(rows, path=MY_TEAM_PATH):
-    """Validate, back up once, then atomically replace `path`. Returns the path."""
-    path = Path(path)
-    validate_rows(rows)
-    text = render_csv(rows, read_header_comments(path))
-
+def _atomic_write(path, text):
+    """Back up `path` once (never overwriting an existing .bak), then
+    atomically replace it with `text` -- temp file in the same directory,
+    fsynced, then os.replace()d, so a crash mid-write can never leave a
+    truncated file. Shared by save_my_team() and save_my_team_state()."""
     backup = path.with_name(path.name + ".bak")
     if not backup.exists():
         shutil.copy2(path, backup)
@@ -93,3 +98,36 @@ def save_my_team(rows, path=MY_TEAM_PATH):
             os.remove(tmp_name)
         raise
     return path
+
+
+def save_my_team(rows, path=MY_TEAM_PATH):
+    """Validate, back up once, then atomically replace `path`. Returns the path."""
+    path = Path(path)
+    validate_rows(rows)
+    text = render_csv(rows, read_header_comments(path))
+    return _atomic_write(path, text)
+
+
+def render_state_csv(total_budget, trades_used, header_lines):
+    """The exact text that will be written for data/my_team_state.csv --
+    same two-field shape optimizer.my_team.load_my_team_state() reads."""
+    buf = io.StringIO()
+    buf.write("".join(line + "\n" for line in header_lines))
+    writer = csv.writer(buf, lineterminator="\n")  # QUOTE_MINIMAL
+    writer.writerow(STATE_HEADER)
+    writer.writerow(["total_budget", total_budget])
+    writer.writerow(["trades_used", trades_used])
+    return buf.getvalue()
+
+
+def save_my_team_state(total_budget, trades_used, path=MY_TEAM_STATE_PATH):
+    """Validate, back up once, then atomically replace `path` (same
+    backup/tempfile/fsync/os.replace write _atomic_write() uses for
+    save_my_team()). Returns the path."""
+    path = Path(path)
+    if total_budget <= 0:
+        raise ValueError(f"total_budget must be positive, got {total_budget}")
+    if trades_used < 0:
+        raise ValueError(f"trades_used must be >= 0, got {trades_used}")
+    text = render_state_csv(float(total_budget), int(trades_used), read_header_comments(path))
+    return _atomic_write(path, text)

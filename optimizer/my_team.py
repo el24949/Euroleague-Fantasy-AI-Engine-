@@ -3,8 +3,9 @@ of the data requirements doc): "what's currently on my roster", as opposed
 to "what should the engine recommend". Two hand-edited CSVs:
   - data/my_team.csv -- 10 players (role: starter/6th_man/bench) + 1 coach,
     with a captain marker. Player names are typed by hand.
-  - data/my_team_state.csv -- remaining_budget and trades_used, simple
-    editable fields tracked separately from the roster.
+  - data/my_team_state.csv -- total_budget (total credits you can spend
+    THIS round, team value + bank -- NOT fixed, changes every round) and
+    trades_used, simple editable fields tracked separately from the roster.
 
 load_my_team() is the reusable entry point other engine parts should
 import to ask "what's my current team" -- returns a dict with a resolved
@@ -374,14 +375,18 @@ def resolve_coach(name, coach_info):
 
 
 def load_my_team_state(state_path=MY_TEAM_STATE_CSV):
+    """{'total_budget', 'trades_used'} from data/my_team_state.csv.
+    total_budget is the total credits you can spend THIS round (team
+    value + bank, exactly as the real game shows it) -- NOT a fixed 100;
+    it changes every round. trades_used is still required (fails loudly
+    if missing, same as before); total_budget defaults to 100.0 if the
+    file predates this field, so an older my_team_state.csv still loads."""
     df = pd.read_csv(state_path, comment="#")
     state = dict(zip(df["field"], df["value"]))
-    required = {"remaining_budget", "trades_used"}
-    missing = required - set(state)
-    if missing:
-        raise ValueError(f"{state_path} is missing required field(s): {sorted(missing)}")
+    if "trades_used" not in state:
+        raise ValueError(f"{state_path} is missing required field(s): ['trades_used']")
     return {
-        "remaining_budget": float(state["remaining_budget"]),
+        "total_budget": float(state["total_budget"]) if "total_budget" in state else 100.0,
         "trades_used": int(state["trades_used"]),
     }
 
@@ -495,8 +500,9 @@ def print_report(loaded):
     print(players[columns].to_string(index=False))
 
     total_price = players["price"].sum() + loaded["coach"]["price"]
-    print(f"\nRoster + coach total price: {total_price:.1f}")
-    print(f"Remaining budget (data/my_team_state.csv): {loaded['state']['remaining_budget']}")
+    total_budget = loaded["state"]["total_budget"]
+    print(f"\nRoster + coach total price: {total_price:.1f} / {total_budget:.1f}")
+    print(f"Credits left (data/my_team_state.csv): {total_budget - total_price:.1f}")
     print(f"Trades used (data/my_team_state.csv): {loaded['state']['trades_used']}")
 
 
