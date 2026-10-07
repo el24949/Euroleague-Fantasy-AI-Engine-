@@ -19,14 +19,14 @@
 # `python -m optimizer.my_team` to validate it and see it reported back
 # with resolved positions and prices.
 player_name,role,captain
-"GARUBA, Usman",starter,
-"BRYANT, Elijah",starter,Y
-"HOARD, Jaylen",starter,
-"DOZIER, Perry",starter,
-"MALCOLM, Collin",starter,
-"OBST, Andreas",6th_man,
-"LIGHTY, David",bench,
-"HOLLATZ, Justus",bench,
-"HAYES, Kevarrius",bench,
-"MITOGLOU, Konstantinos",bench,
-Dimitris Itoudis,coach,
+"VALANCIUNAS, Jonas",starter,Y
+"SHORTS, TJ",starter,
+"FRANCISCO, Sylvain",starter,
+"TUBELIS, Azuolas",starter,
+"MALEDON, Theo",starter,
+"MITOGLOU, Konstantinos",6th_man,
+"MANTZOUKAS, Eleftherios",bench,
+"ROGKAVOPOULOS, Nikos",bench,
+"FODZO DADA, Marc-owen",bench,
+"SANLI, Sertac",bench,
+Joan Penarroya,coach,

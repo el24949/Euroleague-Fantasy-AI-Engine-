@@ -989,52 +989,43 @@ with tab_manual:
     )
     coach_row = coach_pool[coach_choice] if coach_choice is not None else None
 
-    squad_cols = st.columns(2)
-    squad_cols[0].metric("Players selected", len(selected_df))
-    squad_cols[1].metric("Total price", f"{selected_df['Quotation'].sum():.1f}")
-
-    st.subheader("Position breakdown")
-    st.dataframe(
-        selected_df["Position"].value_counts().rename_axis("Position").reset_index(name="Count"),
-        width="stretch",
-    )
-
-    st.subheader("Roster legality check")
-    st.caption(
-        "Display/feedback only -- reports against the 4 hard constraints below, never "
-        "blocks or removes a pick. A partial squad (<10) is a normal in-progress state."
-    )
-
+    # ---- Legality check: compute every constraint first (logic/thresholds
+    # unchanged from before), THEN render one compact status line + an
+    # expander with the full detail -- instead of always-visible metrics/
+    # table/per-check lines. ----
     POSITION_LABELS = {"G": "Guards", "F": "Forwards", "C": "Centers"}
     SQUAD_SIZE = 10
 
     failures = []
+    check_lines = []
 
     squad_count = len(selected_df)
     if squad_count == SQUAD_SIZE:
-        st.write(f"Players: {squad_count}/{SQUAD_SIZE} OK")
+        check_lines.append(f"Players: {squad_count}/{SQUAD_SIZE} OK")
     else:
-        st.write(f"Players: {squad_count}/{SQUAD_SIZE} - need {SQUAD_SIZE}")
+        check_lines.append(f"Players: {squad_count}/{SQUAD_SIZE} - need {SQUAD_SIZE}")
         failures.append(f"Players {squad_count}/{SQUAD_SIZE}")
 
     mapped_positions = selected_df["Position"].map(POSITION_NAME_TO_CODE)
+    pos_actual = {}
     for code, required in REQUIRED_POSITION_COUNTS.items():
         actual = int((mapped_positions == code).sum())
+        pos_actual[code] = actual
         label = POSITION_LABELS[code]
         if actual == required:
-            st.write(f"{label}: {actual}/{required} OK")
+            check_lines.append(f"{label}: {actual}/{required} OK")
         else:
             note = "too many" if actual > required else "too few"
-            st.write(f"{label}: {actual}/{required} - {note}")
+            check_lines.append(f"{label}: {actual}/{required} - {note}")
             failures.append(f"{label} {actual}/{required}")
 
     club_counts = selected_df["Team"].value_counts()
     clubs_over_limit = club_counts[club_counts > MAX_PER_CLUB]
     if clubs_over_limit.empty:
-        st.write(f"Club limit: OK (max {MAX_PER_CLUB} per club)")
+        check_lines.append(f"Club limit: OK (max {MAX_PER_CLUB} per club)")
     else:
         for club, count in clubs_over_limit.items():
-            st.write(f"{club}: {count}/{MAX_PER_CLUB} - too many")
+            check_lines.append(f"{club}: {count}/{MAX_PER_CLUB} - too many")
             failures.append(f"{club} {count}/{MAX_PER_CLUB}")
 
     players_cost = float(selected_df["Quotation"].sum())
@@ -1048,18 +1039,42 @@ with tab_manual:
     # can sum to e.g. 104.10000000000001 in float arithmetic -- comparing the rounded
     # values (not the raw floats) avoids flagging an exact-budget squad as illegal.
     if round(total_cost, 1) <= round(manual_total_budget, 1):
-        st.write(f"{breakdown} OK")
+        check_lines.append(f"{breakdown} OK")
     else:
-        st.write(f"{breakdown} - over budget")
+        check_lines.append(f"{breakdown} - over budget")
         failures.append(
             f"Cost {players_cost:.1f} players + {coach_cost:.1f} coach = "
             f"{total_cost:.1f}/{manual_total_budget:.1f}"
         )
 
+    squad_summary = (
+        f"{squad_count}/{SQUAD_SIZE} players · "
+        f"{pos_actual.get('G', 0)}G {pos_actual.get('F', 0)}F {pos_actual.get('C', 0)}C · "
+        f"cost {total_cost:.1f} / {manual_total_budget:.1f}"
+    )
     if not failures:
-        st.success("Legal squad")
+        st.success(f"✓ Legal squad -- {squad_summary}")
     else:
-        st.error("Not a legal squad -- " + "; ".join(failures))
+        st.error(f"✗ Not legal -- {len(failures)} problem(s) -- {squad_summary}")
+
+    with st.expander("More", expanded=False):
+        st.caption(
+            "Reports against the 4 hard constraints below, never blocks or removes a "
+            "pick. A partial squad (<10) is a normal in-progress state."
+        )
+        detail_cols = st.columns(2)
+        detail_cols[0].metric("Players selected", len(selected_df))
+        detail_cols[1].metric("Total price", f"{players_cost:.1f}")
+
+        st.markdown("**Position breakdown**")
+        st.dataframe(
+            selected_df["Position"].value_counts().rename_axis("Position").reset_index(name="Count"),
+            width="stretch",
+        )
+
+        st.markdown("**Checks**")
+        for line in check_lines:
+            st.write(line)
 
     st.divider()
 
@@ -1178,16 +1193,19 @@ with tab_manual:
                 captain_id = None
                 st.caption("Mark at least one player Starter to pick a captain.")
 
-            st.subheader("Manual roles check")
+            # ---- Manual roles check: compute everything first (logic/thresholds
+            # unchanged), THEN render one compact status line + an expander with
+            # the full detail. ----
             manual_failures = []
+            manual_check_lines = []
 
             manual_role_counts = pd.Series(list(manual_roles.values())).value_counts().to_dict()
             for role, required in {"Starter": 5, "6th Man": 1, "Bench": 4}.items():
                 actual = manual_role_counts.get(role, 0)
                 if actual == required:
-                    st.write(f"{role}: {actual}/{required} OK")
+                    manual_check_lines.append(f"{role}: {actual}/{required} OK")
                 else:
-                    st.write(f"{role}: {actual}/{required} - need exactly {required}")
+                    manual_check_lines.append(f"{role}: {actual}/{required} - need exactly {required}")
                     manual_failures.append(f"{role} {actual}/{required}")
 
             positions_by_id = selected_df.set_index("Player_ID")["position"]
@@ -1207,22 +1225,29 @@ with tab_manual:
                 f"C{starter_pos_counts.get('C', 0)}"
             )
             if legal_formation:
-                st.write(f"Starter formation: {legal_formation} OK")
+                manual_check_lines.append(f"Starter formation: {legal_formation} OK")
             else:
-                st.write(
+                manual_check_lines.append(
                     f"Starter formation: {formation_label} - not one of "
                     f"{', '.join(FORMATIONS)}"
                 )
                 manual_failures.append("formation")
 
             if captain_id is None:
-                st.write("Captain: none selected - FAIL")
+                manual_check_lines.append("Captain: none selected - FAIL")
                 manual_failures.append("captain")
             else:
-                st.write("Captain: OK")
+                manual_check_lines.append("Captain: OK")
 
+            manual_summary = (
+                f"{manual_role_counts.get('Starter', 0)} Starter · "
+                f"{manual_role_counts.get('6th Man', 0)} 6th Man · "
+                f"{manual_role_counts.get('Bench', 0)} Bench · "
+                f"formation {legal_formation or formation_label} · "
+                f"captain {'set' if captain_id is not None else 'not set'}"
+            )
             if not manual_failures:
-                st.success("Manual roles valid")
+                st.success(f"✓ Manual roles valid -- {manual_summary}")
                 roles_df = pd.DataFrame(
                     [
                         {"Player_ID": pid, "role": role, "captain": pid == captain_id}
@@ -1231,7 +1256,14 @@ with tab_manual:
                 )
                 roles_ready = True
             else:
-                st.error("Manual roles not valid -- " + "; ".join(manual_failures))
+                st.error(
+                    f"✗ Manual roles not valid -- {len(manual_failures)} "
+                    f"problem(s) -- {manual_summary}"
+                )
+
+            with st.expander("More", expanded=False):
+                for line in manual_check_lines:
+                    st.write(line)
 
         # ---- Save to data/my_team.csv (shared by auto and manual roles) ----
         st.divider()

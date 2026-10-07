@@ -1,0 +1,17 @@
+# data/my_team_state.csv -- simple editable fields tracked separately from
+# the roster itself (data/my_team.csv). Loaded by optimizer/my_team.py's
+# load_my_team_state(). Lines starting with '#' are ignored.
+#
+# total_budget : total credits you can spend THIS round, exactly as shown
+#                in the EuroLeague Fantasy game (team value + bank) -- NOT
+#                a fixed 100; it changes every round as player prices move
+#                and you bank/spend credits. Edit this (or use the "Save"
+#                button in the My Team tab) to match the game before
+#                picking/saving your squad.
+# trades_used  : how many trades you've made this season so far.
+#
+# Starting values below assume a fresh, untraded team -- edit after every
+# trade / every round.
+field,value
+total_budget,100.0
+trades_used,0
